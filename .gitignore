@@ -1,0 +1,16 @@
+target/
+*.class
+*.jar
+
+.idea/workspace.xml
+.idea/tasks.xml
+.idea/shelf/
+.idea/dictionaries/
+.idea/httpRequests/
+
+*.iml
+*.iws
+*.ipr
+
+.DS_Store
+Thumbs.db
