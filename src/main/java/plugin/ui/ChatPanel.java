@@ -10,6 +10,8 @@ import plugin.settings.PluginSettings;
 import javax.swing.*;
 import javax.swing.border.EmptyBorder;
 import java.awt.*;
+import java.awt.event.KeyAdapter;
+import java.awt.event.KeyEvent;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -18,7 +20,7 @@ public class ChatPanel {
     private final JPanel root;
 
     private JTextArea    chatArea;
-    private JTextField   promptField;
+    private JTextArea    promptArea;
     private JButton      sendBtn;
     private JProgressBar spinner;
 
@@ -168,7 +170,8 @@ public class ChatPanel {
         chatArea.setMargin(new Insets(6, 8, 6, 8));
 
         JScrollPane scroll = new JScrollPane(chatArea);
-        scroll.setVerticalScrollBarPolicy(ScrollPaneConstants.VERTICAL_SCROLLBAR_AS_NEEDED);
+        scroll.setVerticalScrollBarPolicy(ScrollPaneConstants.VERTICAL_SCROLLBAR_ALWAYS);
+        scroll.setHorizontalScrollBarPolicy(ScrollPaneConstants.HORIZONTAL_SCROLLBAR_NEVER);
         return scroll;
     }
 
@@ -180,9 +183,25 @@ public class ChatPanel {
         JPanel panel = new JPanel(new BorderLayout(0, 4));
         panel.setBorder(new EmptyBorder(6, 8, 8, 8));
 
-        promptField = new JTextField();
-        promptField.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 13));
-        promptField.addActionListener(e -> sendMessage());
+        // Multi-line input — Enter sends, Shift+Enter inserts newline
+        promptArea = new JTextArea(3, 0);
+        promptArea.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 13));
+        promptArea.setLineWrap(true);
+        promptArea.setWrapStyleWord(true);
+        promptArea.setMargin(new Insets(4, 6, 4, 6));
+        promptArea.addKeyListener(new KeyAdapter() {
+            @Override
+            public void keyPressed(KeyEvent e) {
+                if (e.getKeyCode() == KeyEvent.VK_ENTER && !e.isShiftDown()) {
+                    e.consume();
+                    sendMessage();
+                }
+            }
+        });
+
+        JScrollPane promptScroll = new JScrollPane(promptArea);
+        promptScroll.setVerticalScrollBarPolicy(ScrollPaneConstants.VERTICAL_SCROLLBAR_AS_NEEDED);
+        promptScroll.setHorizontalScrollBarPolicy(ScrollPaneConstants.HORIZONTAL_SCROLLBAR_NEVER);
 
         sendBtn = new JButton("Send");
         sendBtn.addActionListener(e -> sendMessage());
@@ -198,16 +217,16 @@ public class ChatPanel {
         spinner.setPreferredSize(new Dimension(80, 14));
         spinner.setVisible(false);
 
-        JPanel inputRow = new JPanel(new BorderLayout(4, 0));
-        inputRow.add(promptField, BorderLayout.CENTER);
-        inputRow.add(sendBtn,     BorderLayout.EAST);
+        // Bottom row: Clear + spinner on left, Send on right
+        JPanel ctrlRow = new JPanel(new BorderLayout(4, 0));
+        JPanel leftCtrl = new JPanel(new FlowLayout(FlowLayout.LEFT, 4, 0));
+        leftCtrl.add(clearBtn);
+        leftCtrl.add(spinner);
+        ctrlRow.add(leftCtrl,  BorderLayout.WEST);
+        ctrlRow.add(sendBtn,   BorderLayout.EAST);
 
-        JPanel ctrlRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 4, 0));
-        ctrlRow.add(clearBtn);
-        ctrlRow.add(spinner);
-
-        panel.add(inputRow, BorderLayout.CENTER);
-        panel.add(ctrlRow,  BorderLayout.SOUTH);
+        panel.add(promptScroll, BorderLayout.CENTER);
+        panel.add(ctrlRow,      BorderLayout.SOUTH);
         return panel;
     }
 
@@ -216,7 +235,7 @@ public class ChatPanel {
     // -------------------------------------------------------------------------
 
     private void sendMessage() {
-        String text = promptField.getText().trim();
+        String text = promptArea.getText().trim();
         if (text.isEmpty()) return;
 
         PluginSettings s    = PluginSettings.getInstance();
@@ -230,7 +249,7 @@ public class ChatPanel {
 
         appendChat("You", text);
         history.add(new ChatMessage("user", text));
-        promptField.setText("");
+        promptArea.setText("");
         setLoading(true);
 
         List<ChatMessage> snapshot = new ArrayList<>(history);
