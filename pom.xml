@@ -123,6 +123,15 @@
             <systemPath>${intellij.lib}/intellij.platform.analysis.jar</systemPath>
         </dependency>
 
+        <!-- Icons (AllIcons) -->
+        <dependency>
+            <groupId>com.intellij.platform</groupId>
+            <artifactId>util-ui</artifactId>
+            <version>2025.2</version>
+            <scope>system</scope>
+            <systemPath>${intellij.lib}/intellij.platform.util.ui.jar</systemPath>
+        </dependency>
+
         <!-- Bundled Gson — system scope (provided by IntelliJ at runtime) -->
         <dependency>
             <groupId>com.intellij.bundled</groupId>
