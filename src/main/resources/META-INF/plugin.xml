@@ -1,40 +1,29 @@
 <idea-plugin>
-    <id>plugin.my-local-llm-plugin</id>
+    <id>plugin.local-llm-assistant</id>
     <name>Local LLM Assistant</name>
     <version>1.0.0</version>
-    <vendor email="R.NazmusSalahin@ibfd.org">Rocky</vendor>
+    <vendor>Local</vendor>
 
-    <description><![CDATA[
-        Chat with local LLMs (Ollama, LM Studio) directly inside IntelliJ IDEA.
-        Supports streaming responses, file context injection, image attachments,
-        clipboard image paste, and auto file editing with diff preview.
-    ]]></description>
+    <description>Chat with a local LLM via LM Studio's OpenAI-compatible API.</description>
+
+    <!-- IntelliJ IDEA 2025.2.x build range -->
+    <idea-version since-build="252"/>
 
     <depends>com.intellij.modules.platform</depends>
 
     <extensions defaultExtensionNs="com.intellij">
+
+        <!-- Tool window shown in the right stripe -->
+        <toolWindow
+            id="Local LLM"
+            anchor="right"
+            secondary="false"
+            factoryClass="plugin.toolwindow.ChatToolWindowFactory"/>
+
+        <!-- Application-level persistent settings -->
         <applicationService
             serviceImplementation="plugin.settings.PluginSettings"/>
 
-        <applicationConfigurable
-            parentId="tools"
-            instance="plugin.settings.SettingsUI"
-            id="plugin.settings.SettingsUI"
-            displayName="Local LLM Assistant"/>
-
-        <toolWindow
-            id="Local LLM Assistant"
-            anchor="right"
-            factoryClass="plugin.MyPluginFactory"/>
     </extensions>
 
-    <actions>
-        <action id="plugin.SendSelectionAction"
-                class="plugin.actions.SendSelectionAction"
-                text="Send Selection to Local LLM"
-                description="Send the current selection to the Local LLM Assistant chat">
-            <keyboard-shortcut keymap="$default" first-keystroke="ctrl shift L"/>
-            <add-to-group group-id="EditorPopupMenu" anchor="last"/>
-        </action>
-    </actions>
 </idea-plugin>

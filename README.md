@@ -1,241 +1,115 @@
-# Local LLM Assistant — IntelliJ Plugin
+# Local LLM Assistant — IntelliJ IDEA Plugin
 
-A JetBrains plugin that brings local LLM chat (Ollama / LM Studio) directly into your IDE.
-Supports streaming responses, file context injection, image paste, file attachments, and
-automatic code editing with diff preview.
-
-Works in **IntelliJ IDEA**, **GoLand**, and any other JetBrains IDE that runs on the
-IntelliJ platform.
+A chat plugin for IntelliJ IDEA that connects to a locally running LLM via
+[LM Studio](https://lmstudio.ai)'s OpenAI-compatible API.
 
 ---
 
 ## Requirements
 
-| Requirement | Details |
-|-------------|---------|
-| JetBrains IDE | IntelliJ IDEA 2024.1+ (Community or Ultimate), GoLand 2024.1+, etc. |
-| Java | JDK 17+ on PATH (needed to build from source) |
-| Maven | 3.8+ on PATH (needed to build from source) |
-| LLM backend | [Ollama](https://ollama.com) and/or [LM Studio](https://lmstudio.ai) running locally |
+| Requirement | Version |
+|---|---|
+| IntelliJ IDEA | 2025.2 or later |
+| Java (JDK) | 21 |
+| Maven | 3.8+ |
+| LM Studio | Any recent release |
 
 ---
 
-## Building from Source
+## Build
 
 ```bash
+# Clone the repository
 git clone <repo-url>
 cd my-local-llm-plugin
-mvn clean package
+
+# Compile and package
+mvn package
+
+# Output
+target/local-llm-assistant.jar
 ```
 
-The build produces two jars in `target/`:
-
-| Jar | Purpose |
-|-----|---------|
-| `my-local-llm-plugin-1.0.0.jar` | Plugin sources only (no dependencies) |
-| `my-local-llm-plugin-1.0.0-jar-with-dependencies.jar` | **Use this one** — includes Gson and Apache HttpClient5 |
-
-> **Note:** The build references IntelliJ SDK jars via system scope from
-> `C:\Program Files\JetBrains\IntelliJ IDEA 2025.2.5\lib\`.
-> If your IntelliJ is installed elsewhere, update the `<intellij.home>` property
-> in `pom.xml` before building.
+> **Note:** The `intellij.lib` property in `pom.xml` defaults to
+> `C:/Program Files/JetBrains/IntelliJ IDEA 2025.2.5/lib`.
+> If your IntelliJ is installed elsewhere, update that property before building:
+>
+> ```xml
+> <intellij.lib>C:/Your/Path/To/IntelliJ IDEA 2025.x.x/lib</intellij.lib>
+> ```
 
 ---
 
-## Installation
+## Install the Plugin
 
-### Option A — Install from the built JAR (recommended)
+### Option A — Install from Disk (recommended for development)
 
-1. Open your JetBrains IDE.
-2. Go to **File → Settings** (or **IntelliJ IDEA → Settings** on macOS).
-3. Navigate to **Plugins**.
-4. Click the gear icon (**⚙**) at the top → **Install Plugin from Disk…**
-5. Select `target/my-local-llm-plugin-1.0.0-jar-with-dependencies.jar`.
-6. Click **OK** and restart the IDE when prompted.
+1. Open IntelliJ IDEA.
+2. Go to **File → Settings → Plugins** (or press `Ctrl+Alt+S` then navigate to Plugins).
+3. Click the **gear icon (⚙)** at the top of the Plugins panel.
+4. Select **Install Plugin from Disk…**
+
+   ![Install from disk menu](docs/install-from-disk.png)
+
+5. Browse to `target/local-llm-assistant.jar` and click **OK**.
+6. Click **Restart IDE** when prompted.
 
 ### Option B — Copy to plugins directory manually
 
-1. Locate your IDE plugins directory:
-   - **Windows:** `%APPDATA%\JetBrains\<IDE><version>\plugins\`
-   - **macOS:** `~/Library/Application Support/JetBrains/<IDE><version>/plugins/`
-   - **Linux:** `~/.local/share/JetBrains/<IDE><version>/plugins/`
-2. Create a folder: `plugins/local-llm-assistant/lib/`
-3. Copy `my-local-llm-plugin-1.0.0-jar-with-dependencies.jar` into that `lib/` folder.
-4. Restart the IDE.
+1. Find your IntelliJ plugins directory:
+   - Windows: `%APPDATA%\JetBrains\IntelliJIdea2025.2\plugins\`
+2. Create a subfolder: `local-llm-assistant\lib\`
+3. Copy `target/local-llm-assistant.jar` into that `lib\` folder.
+4. Restart IntelliJ IDEA.
 
 ---
 
-## First-time Setup
+## Uninstall
 
-### 1. Start your LLM backend
-
-**Ollama** (default, port 11434):
-```bash
-ollama serve
-ollama pull llama3.2        # or any model you prefer
-```
-
-**LM Studio** (default, port 1234):
-1. Open LM Studio → **Local Server** tab.
-2. Load a model and click **Start Server**.
-
-### 2. Configure the plugin
-
-1. Go to **File → Settings → Tools → Local LLM Assistant**.
-2. Select your backend (**Ollama** or **LM Studio**).
-3. Verify the URL (defaults are pre-filled):
-   - Ollama: `http://localhost:11434`
-   - LM Studio: `http://localhost:1234`
-4. Click **Test Connection**.
-   - A green **✓ Connected** message confirms the backend is reachable.
-   - The **Model** dropdown is populated automatically from the running backend.
-5. Select your model from the dropdown.
-6. Optionally adjust:
-   - **System Prompt** — instructions prepended to every conversation.
-   - **Temperature** — creativity slider (0.0 = deterministic, 1.0 = creative).
-   - **Max Tokens** — maximum response length.
-   - **Auto-apply edits** — skip the diff preview and write files directly (use carefully).
-7. Click **Apply** / **OK**.
+1. Go to **File → Settings → Plugins**.
+2. Find **Local LLM Assistant** in the **Installed** tab.
+3. Click the three-dot menu (⋯) next to the plugin name.
+4. Select **Uninstall**.
+5. Restart the IDE.
 
 ---
 
-## Opening the Chat Panel
+## Setup — LM Studio
 
-The chat panel appears as a tool window on the **right side** of the IDE.
-
-- Click **Local LLM Assistant** in the right sidebar, or
-- Go to **View → Tool Windows → Local LLM Assistant**.
+1. Download and install [LM Studio](https://lmstudio.ai).
+2. Download a model (e.g. `qwen2.5-coder-7b-instruct`).
+3. Go to the **Local Server** tab in LM Studio.
+4. Click **Start Server** — it starts on `http://127.0.0.1:1234` by default.
+5. Load a model in the server (select it from the dropdown at the top of the Server tab).
 
 ---
 
 ## Using the Plugin
 
-### Basic chat
+### Open the Chat Window
 
-1. Type your message in the text area at the bottom.
-2. Press **Enter** to send (or click **Send**).
-   - **Shift+Enter** inserts a newline without sending.
-3. The assistant response streams in token by token in the chat area.
-4. Click **Stop** at any time to cancel a running response.
-5. Click **Clear** (toolbar) to reset the conversation history.
+After installation, the **Local LLM** tool window appears in the right-side stripe.
+Click it to open the panel.
 
-### Inject context with @ commands
-
-Type these keywords anywhere in your message:
-
-| Command | What it injects |
-|---------|-----------------|
-| `@file` | Full content of the currently open file |
-| `@selection` | Currently selected text in the editor |
-| `@project` | Two-level file tree of your project |
-
-Example: `@file Can you refactor this class to use the builder pattern?`
-
-### Attach files via the clip button
-
-1. Click **📎** next to the input area.
-2. Pick a file:
-   - **Images** (jpg, png, gif, webp) — converted to base64 and sent to vision-capable models.
-   - **Text files** (java, kt, go, py, md, json, yaml, xml, etc.) — injected as a fenced code block in the prompt.
-3. A chip appears above the input showing the file name.
-4. Click **×** on a chip to remove it before sending.
-
-### Paste an image from clipboard
-
-1. Copy any image (screenshot, diagram, etc.) to your clipboard.
-2. Click inside the message input area.
-3. Press **Ctrl+V**.
-   - If the clipboard contains an image, a thumbnail chip appears instead of pasting text.
-   - If it contains text, normal paste behaviour applies.
-
-### Send selected code via right-click or shortcut
-
-1. Select any text or code in the editor.
-2. Right-click → **Send Selection to Local LLM**, or press **Ctrl+Shift+L**.
-3. The chat panel opens and the selection is sent immediately.
-
----
-
-## Auto File Editing
-
-When the model suggests code changes in the format below, the plugin shows **Copy** and
-**Apply to File** buttons directly in the response bubble.
-
-Model output format (the system prompt enforces this automatically):
-
-````
-```java:src/main/java/com/example/MyClass.java
-// complete file content here
 ```
-````
+View → Tool Windows → Local LLM
+```
 
-### Applying a change
+### Configure Settings
 
-1. The assistant bubble shows a code block with a header bar displaying the language and file path.
-2. Click **📝 Apply to File**:
-   - **File exists** → a diff dialog opens showing the before/after changes with colour highlighting. Click **Apply Changes** to write, or **Cancel** to discard.
-   - **File does not exist** → a confirmation dialog asks whether to create the file.
-3. After writing, the IDE refreshes the VFS automatically.
+1. Click the **Settings** section header to expand it.
+2. **Server Endpoint** — leave as `http://127.0.0.1:1234` unless you changed LM Studio's port.
+3. Click **Refresh Models** — the model dropdown populates automatically from the running LM Studio server.
+4. Select the model you want to use.
+5. Click **Save Settings** — your endpoint and model are persisted across IDE restarts.
 
-### Applying multiple files
+### Chat
 
-Each file block in a single response gets its own **Apply to File** button. Apply them
-independently in any order.
-
-### Auto-apply mode
-
-Enable **Auto-apply edits** in Settings to skip the diff dialog and write immediately.
-A confirmation dialog still appears for new files.
-
----
-
-## Settings Reference
-
-| Setting | Default | Description |
-|---------|---------|-------------|
-| Backend | Ollama | Which LLM server to use |
-| Ollama URL | `http://localhost:11434` | Ollama REST API base URL |
-| LM Studio URL | `http://localhost:1234` | LM Studio OpenAI-compatible API base URL |
-| Model | _(from backend)_ | Model name to use for chat |
-| System Prompt | `You are a helpful coding assistant.` | Prepended to every request |
-| Temperature | 0.70 | Sampling temperature |
-| Max Tokens | 4096 | Maximum tokens in each response |
-| Auto-apply edits | Off | Write files without showing diff |
-
----
-
-## Keyboard Shortcuts
-
-| Shortcut | Action |
-|----------|--------|
-| **Enter** | Send message |
-| **Shift+Enter** | New line in input |
-| **Ctrl+V** (in input area) | Paste image from clipboard |
-| **Ctrl+Shift+L** (in editor) | Send selected text to chat |
-
----
-
-## Troubleshooting
-
-**"Backend not available" warning on startup**
-- Make sure Ollama (`ollama serve`) or LM Studio server is running before opening the IDE.
-- Check the URL in Settings matches the port your backend is actually using.
-- Firewalls or VPNs may block localhost connections — try disabling them temporarily.
-
-**Model dropdown is empty after Test Connection**
-- Ollama: run `ollama list` in a terminal to confirm at least one model is downloaded.
-- LM Studio: load a model in the app before starting the server.
-
-**Build fails with "cannot find symbol"**
-- Update `<intellij.home>` in `pom.xml` to point to your actual IntelliJ installation directory.
-- The SDK jars are resolved from that path at compile time.
-
-**Responses truncated**
-- Increase **Max Tokens** in Settings (up to 32000).
-- Some models have a built-in context window limit; switch to a model with a larger context.
-
-**Images not sent to model**
-- Vision support depends on the model. Use a multimodal model (e.g. `llava`, `llama3.2-vision` in Ollama, or a vision model in LM Studio).
+1. Type your message in the input field at the bottom of the panel.
+2. Press **Enter** or click **Send**.
+3. The spinner shows while the model is generating a response.
+4. The response appears in the conversation area above.
+5. Click **Clear** to reset the conversation history.
 
 ---
 
@@ -244,37 +118,52 @@ A confirmation dialog still appears for new files.
 ```
 my-local-llm-plugin/
 ├── pom.xml
+├── README.md
 └── src/main/
     ├── java/plugin/
-    │   ├── actions/
-    │   │   └── SendSelectionAction.java      # Ctrl+Shift+L action
-    │   ├── context/
-    │   │   ├── FileContextReader.java         # @file / @selection helpers
-    │   │   └── ProjectContextBuilder.java     # @project file tree builder
-    │   ├── llm/
-    │   │   ├── LLMClient.java                 # Interface
-    │   │   ├── OllamaClient.java              # Ollama NDJSON streaming
-    │   │   ├── LMStudioClient.java            # LM Studio SSE streaming
-    │   │   └── model/
-    │   │       ├── ChatMessage.java
-    │   │       ├── ImageAttachment.java
-    │   │       ├── TextAttachment.java
-    │   │       └── StreamChunk.java
-    │   ├── settings/
-    │   │   ├── PluginSettings.java            # Persistent settings state
-    │   │   └── SettingsUI.java                # Settings panel under Tools
+    │   ├── toolwindow/
+    │   │   └── ChatToolWindowFactory.java   # Registers the tool window with IntelliJ
     │   ├── ui/
-    │   │   ├── ChatPanel.java                 # Main chat UI
-    │   │   ├── MessageBubble.java             # Chat bubbles + Apply buttons
-    │   │   ├── FileChip.java                  # Attachment chips
-    │   │   ├── FileEditor.java                # File write + diff utility
-    │   │   └── DiffViewer.java                # Unified diff renderer
-    │   └── MyPluginFactory.java               # Tool window factory
-    └── resources/META-INF/plugin.xml
+    │   │   └── ChatPanel.java               # JavaFX UI (embedded via JFXPanel)
+    │   ├── settings/
+    │   │   └── PluginSettings.java          # Persistent settings (endpoint, model)
+    │   └── llm/
+    │       ├── LMStudioClient.java          # HTTP client for LM Studio API
+    │       └── model/
+    │           └── ChatMessage.java         # Chat message record (role + content)
+    └── resources/
+        └── META-INF/
+            └── plugin.xml                   # Plugin descriptor
 ```
 
 ---
 
-## License
+## API Endpoints Used
 
-MIT
+| Purpose | Method | URL |
+|---|---|---|
+| List available models | `GET` | `/v1/models` |
+| Send a chat message | `POST` | `/v1/chat/completions` |
+
+LM Studio implements the OpenAI-compatible API, so any OpenAI-compatible
+local server (e.g. Ollama with `ollama serve`) works as a drop-in replacement
+by just changing the endpoint URL.
+
+---
+
+## Troubleshooting
+
+**"Error: Connection refused"**
+- Make sure LM Studio's local server is running.
+- Verify the endpoint in Settings matches LM Studio's port.
+
+**Model dropdown is empty after Refresh**
+- A model must be loaded in LM Studio's Server tab before it appears in the list.
+- Check LM Studio is running and the server is started.
+
+**Plugin not visible after install**
+- Make sure you restarted IntelliJ after installation.
+- Check **File → Settings → Plugins → Installed** to confirm it is enabled.
+
+**Build fails with "system path does not exist"**
+- Update `<intellij.lib>` in `pom.xml` to match your actual IntelliJ installation path.

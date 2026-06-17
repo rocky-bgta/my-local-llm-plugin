@@ -1,510 +1,266 @@
 package plugin.ui;
 
 import com.intellij.openapi.project.Project;
-import com.intellij.openapi.vfs.LocalFileSystem;
-import com.intellij.openapi.vfs.VirtualFile;
-import plugin.context.FileContextReader;
-import plugin.context.ProjectContextBuilder;
-import plugin.llm.LLMClient;
+import org.jetbrains.annotations.NotNull;
 import plugin.llm.LMStudioClient;
-import plugin.llm.OllamaClient;
 import plugin.llm.model.ChatMessage;
-import plugin.llm.model.ImageAttachment;
-import plugin.llm.model.TextAttachment;
 import plugin.settings.PluginSettings;
 
-import javax.imageio.ImageIO;
 import javax.swing.*;
+import javax.swing.border.EmptyBorder;
+import javax.swing.border.TitledBorder;
 import java.awt.*;
-import java.awt.datatransfer.DataFlavor;
-import java.awt.datatransfer.Transferable;
-import java.awt.dnd.DnDConstants;
-import java.awt.dnd.DropTarget;
-import java.awt.dnd.DropTargetDropEvent;
-import java.awt.event.KeyAdapter;
-import java.awt.event.KeyEvent;
-import java.awt.image.BufferedImage;
-import java.io.ByteArrayOutputStream;
-import java.io.File;
-import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
 import java.util.ArrayList;
-import java.util.Base64;
 import java.util.List;
 
-public class ChatPanel extends JPanel {
+public class ChatPanel {
 
-    private static final String[] IMAGE_EXTS = {"jpg", "jpeg", "png", "gif", "webp"};
-    private static final String[] TEXT_EXTS = {
-        "java", "kt", "go", "py", "txt", "md", "json", "yaml", "yml",
-        "xml", "html", "ts", "js", "css", "sql", "sh", "toml", "gradle", "properties"
-    };
+    private final JPanel root;
 
-    private final Project project;
+    // Settings widgets
+    private JTextField        endpointField;
+    private JComboBox<String> modelCombo;
+    private JButton           refreshBtn;
+    private JLabel            statusLabel;
+
+    // Chat widgets
+    private JTextArea  chatArea;
+    private JTextField promptField;
+    private JButton    sendBtn;
+    private JProgressBar spinner;
+
     private final List<ChatMessage> history = new ArrayList<>();
-    private final List<ImageAttachment> pendingImages = new ArrayList<>();
-    private final List<TextAttachment> pendingFiles = new ArrayList<>();
-    private final FileContextReader contextReader;
-    private final ProjectContextBuilder contextBuilder;
 
-    private JPanel messagesPanel;
-    private JScrollPane messagesScroll;
-    private JTextArea inputArea;
-    private JButton sendButton;
-    private JButton stopButton;
-    private JButton clearButton;
-    private JPanel attachmentPanel;
-    private Thread streamingThread;
+    public ChatPanel(@NotNull Project project) {
+        root = new JPanel(new BorderLayout(0, 6));
+        root.setBorder(new EmptyBorder(8, 8, 8, 8));
 
-    public ChatPanel(Project project) {
-        this.project = project;
-        this.contextReader = new FileContextReader(project);
-        this.contextBuilder = new ProjectContextBuilder(project);
-        setLayout(new BorderLayout());
-        buildUI();
-        checkBackendAvailability();
+        root.add(buildSettingsPanel(), BorderLayout.NORTH);
+        root.add(buildChatArea(),      BorderLayout.CENTER);
+        root.add(buildInputPanel(),    BorderLayout.SOUTH);
+
+        loadSettings();
     }
 
-    private void buildUI() {
-        messagesPanel = new JPanel();
-        messagesPanel.setLayout(new BoxLayout(messagesPanel, BoxLayout.Y_AXIS));
-        messagesPanel.setBackground(new Color(25, 25, 35));
-        messagesPanel.setBorder(BorderFactory.createEmptyBorder(4, 4, 4, 4));
+    // -------------------------------------------------------------------------
+    // Panel builders
+    // -------------------------------------------------------------------------
 
-        messagesScroll = new JScrollPane(messagesPanel);
-        messagesScroll.setBorder(BorderFactory.createEmptyBorder());
-        messagesScroll.getVerticalScrollBar().setUnitIncrement(16);
-        messagesScroll.setBackground(new Color(25, 25, 35));
+    private JPanel buildSettingsPanel() {
+        JPanel panel = new JPanel(new GridBagLayout());
+        panel.setBorder(BorderFactory.createTitledBorder(
+                BorderFactory.createEtchedBorder(),
+                "Settings", TitledBorder.LEFT, TitledBorder.TOP));
 
-        JPanel toolbar = buildToolbar();
-        add(toolbar, BorderLayout.NORTH);
-        add(messagesScroll, BorderLayout.CENTER);
-        add(buildInputPanel(), BorderLayout.SOUTH);
+        GridBagConstraints lc = new GridBagConstraints();
+        lc.anchor  = GridBagConstraints.WEST;
+        lc.insets  = new Insets(3, 6, 3, 4);
 
-        setupFileDrop();
+        GridBagConstraints fc = new GridBagConstraints();
+        fc.fill      = GridBagConstraints.HORIZONTAL;
+        fc.weightx   = 1.0;
+        fc.gridwidth = GridBagConstraints.REMAINDER;
+        fc.insets    = new Insets(3, 0, 3, 6);
+
+        endpointField = new JTextField("http://127.0.0.1:1234");
+        modelCombo    = new JComboBox<>();
+        refreshBtn    = new JButton("Refresh Models");
+        JButton saveBtn = new JButton("Save Settings");
+        statusLabel   = new JLabel(" ");
+        statusLabel.setFont(statusLabel.getFont().deriveFont(Font.ITALIC, 11f));
+
+        // Row 0 — endpoint
+        addRow(panel, "Endpoint:", endpointField, lc, fc, 0);
+        // Row 1 — refresh button (full width)
+        fc.gridy = 1;
+        panel.add(refreshBtn, fc);
+        // Row 2 — model
+        addRow(panel, "Model:", modelCombo, lc, fc, 2);
+        // Row 3 — save button (full width)
+        fc.gridy = 3;
+        panel.add(saveBtn, fc);
+        // Row 4 — status
+        fc.gridy = 4;
+        panel.add(statusLabel, fc);
+
+        refreshBtn.addActionListener(e -> refreshModels());
+        saveBtn.addActionListener(e -> saveSettings());
+
+        return panel;
     }
 
-    private JPanel buildToolbar() {
-        JPanel toolbar = new JPanel(new BorderLayout(4, 0));
-        toolbar.setBackground(new Color(35, 35, 48));
-        toolbar.setBorder(BorderFactory.createEmptyBorder(4, 6, 4, 6));
+    private static void addRow(JPanel panel, String labelText, JComponent field,
+                               GridBagConstraints lc, GridBagConstraints fc, int row) {
+        lc.gridx = 0; lc.gridy = row;
+        panel.add(new JLabel(labelText), lc);
+        fc.gridx = 1; fc.gridy = row;
+        panel.add(field, fc);
+    }
 
-        clearButton = new JButton("Clear");
-        clearButton.setFont(clearButton.getFont().deriveFont(11f));
-        clearButton.addActionListener(e -> clearConversation());
+    private JScrollPane buildChatArea() {
+        chatArea = new JTextArea();
+        chatArea.setEditable(false);
+        chatArea.setLineWrap(true);
+        chatArea.setWrapStyleWord(true);
+        chatArea.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 13));
+        chatArea.setMargin(new Insets(4, 6, 4, 6));
 
-        JLabel backendLabel = new JLabel("●");
-        backendLabel.setForeground(new Color(80, 200, 80));
-        backendLabel.setFont(backendLabel.getFont().deriveFont(14f));
-        backendLabel.setToolTipText("Backend status");
-
-        toolbar.add(backendLabel, BorderLayout.WEST);
-        toolbar.add(clearButton, BorderLayout.EAST);
-        return toolbar;
+        JScrollPane scroll = new JScrollPane(chatArea);
+        scroll.setVerticalScrollBarPolicy(ScrollPaneConstants.VERTICAL_SCROLLBAR_AS_NEEDED);
+        return scroll;
     }
 
     private JPanel buildInputPanel() {
-        attachmentPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 4, 2));
-        attachmentPanel.setBackground(new Color(30, 30, 45));
-        attachmentPanel.setVisible(false);
+        JPanel panel = new JPanel(new BorderLayout(0, 4));
 
-        inputArea = new JTextArea(3, 40);
-        inputArea.setLineWrap(true);
-        inputArea.setWrapStyleWord(true);
-        inputArea.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 13));
-        inputArea.setBackground(new Color(40, 40, 55));
-        inputArea.setForeground(new Color(220, 220, 220));
-        inputArea.setCaretColor(Color.WHITE);
-        inputArea.setBorder(BorderFactory.createEmptyBorder(6, 8, 6, 8));
+        promptField = new JTextField();
+        promptField.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 13));
+        promptField.addActionListener(e -> sendMessage());
 
-        inputArea.addKeyListener(new KeyAdapter() {
-            @Override
-            public void keyPressed(KeyEvent e) {
-                if (e.getKeyCode() == KeyEvent.VK_ENTER && !e.isShiftDown()) {
-                    e.consume();
-                    sendMessage();
-                }
-            }
+        sendBtn = new JButton("Send");
+        sendBtn.addActionListener(e -> sendMessage());
 
-            @Override
-            public void keyTyped(KeyEvent e) {
-                if (e.getKeyChar() == KeyEvent.VK_ENTER && !e.isShiftDown()) {
-                    e.consume();
-                }
-            }
+        JButton clearBtn = new JButton("Clear");
+        clearBtn.addActionListener(e -> {
+            chatArea.setText("");
+            history.clear();
         });
 
-        inputArea.addKeyListener(new KeyAdapter() {
-            @Override
-            public void keyPressed(KeyEvent e) {
-                if (e.isControlDown() && e.getKeyCode() == KeyEvent.VK_V) {
-                    if (pasteImageFromClipboard()) {
-                        e.consume();
-                    }
-                }
-            }
-        });
-
-        sendButton = new JButton("Send");
-        sendButton.addActionListener(e -> sendMessage());
-
-        stopButton = new JButton("Stop");
-        stopButton.setBackground(new Color(160, 50, 50));
-        stopButton.setForeground(Color.WHITE);
-        stopButton.setVisible(false);
-        stopButton.addActionListener(e -> stopStreaming());
-
-        JButton attachButton = new JButton("📎");
-        attachButton.setToolTipText("Attach file or image");
-        attachButton.addActionListener(e -> openFilePicker());
-
-        JPanel buttonCol = new JPanel(new GridLayout(3, 1, 0, 2));
-        buttonCol.setOpaque(false);
-        buttonCol.add(sendButton);
-        buttonCol.add(stopButton);
-        buttonCol.add(attachButton);
+        spinner = new JProgressBar();
+        spinner.setIndeterminate(false);
+        spinner.setPreferredSize(new Dimension(80, 14));
+        spinner.setVisible(false);
 
         JPanel inputRow = new JPanel(new BorderLayout(4, 0));
-        inputRow.setBackground(new Color(35, 35, 48));
-        inputRow.setBorder(BorderFactory.createEmptyBorder(4, 4, 4, 4));
-        inputRow.add(new JScrollPane(inputArea), BorderLayout.CENTER);
-        inputRow.add(buttonCol, BorderLayout.EAST);
+        inputRow.add(promptField, BorderLayout.CENTER);
+        inputRow.add(sendBtn,     BorderLayout.EAST);
 
-        JPanel bottomPanel = new JPanel(new BorderLayout());
-        bottomPanel.setBackground(new Color(30, 30, 45));
-        bottomPanel.add(attachmentPanel, BorderLayout.NORTH);
-        bottomPanel.add(inputRow, BorderLayout.CENTER);
-        return bottomPanel;
+        JPanel ctrlRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 4, 0));
+        ctrlRow.add(clearBtn);
+        ctrlRow.add(spinner);
+
+        panel.add(inputRow, BorderLayout.CENTER);
+        panel.add(ctrlRow,  BorderLayout.SOUTH);
+        return panel;
     }
 
-    private void checkBackendAvailability() {
-        new Thread(() -> {
-            LLMClient client = buildClient();
-            boolean available = client.isAvailable();
-            SwingUtilities.invokeLater(() -> {
-                if (!available) {
-                    addSystemMessage("⚠ Backend not available. Start Ollama or LM Studio and check Settings.");
-                }
-            });
-        }, "backend-check").start();
-    }
+    // -------------------------------------------------------------------------
+    // Settings
+    // -------------------------------------------------------------------------
 
-    private void addSystemMessage(String text) {
-        MessageBubble bubble = new MessageBubble(ChatMessage.Role.ASSISTANT, text, project);
-        messagesPanel.add(bubble);
-        messagesPanel.add(Box.createVerticalStrut(4));
-        messagesPanel.revalidate();
-    }
-
-    public void sendMessage() {
-        String rawText = inputArea.getText().trim();
-        if (rawText.isEmpty() && pendingImages.isEmpty() && pendingFiles.isEmpty()) return;
-
-        StringBuilder fullText = new StringBuilder();
-        for (TextAttachment ta : pendingFiles) {
-            fullText.append(ta.toPromptString()).append("\n");
-        }
-
-        if (rawText.contains("@file")) {
-            String fileContent = contextReader.getCurrentFileContent();
-            String fileName = contextReader.getCurrentFileName();
-            if (fileContent != null && fileName != null) {
-                fullText.append("[Current file: ").append(fileName).append("]\n```\n")
-                        .append(fileContent).append("\n```\n\n");
-            }
-            rawText = rawText.replace("@file", "").trim();
-        }
-        if (rawText.contains("@selection")) {
-            String selection = contextReader.getSelectedText();
-            if (selection != null) {
-                fullText.append("[Selected text]\n```\n").append(selection).append("\n```\n\n");
-            }
-            rawText = rawText.replace("@selection", "").trim();
-        }
-        if (rawText.contains("@project")) {
-            fullText.append(contextBuilder.buildFileTree()).append("\n");
-            rawText = rawText.replace("@project", "").trim();
-        }
-
-        fullText.append(contextBuilder.injectContext(rawText));
-        String messageWithContext = fullText.toString().trim();
-        if (messageWithContext.isEmpty()) return;
-
-        inputArea.setText("");
-
-        List<String> imageBase64List = new ArrayList<>();
-        for (ImageAttachment img : pendingImages) {
-            imageBase64List.add(img.getBase64Data());
-        }
-
-        List<ImageAttachment> userImages = new ArrayList<>(pendingImages);
-        ChatMessage userMsg = new ChatMessage(ChatMessage.Role.USER, rawText.isEmpty() ? "[image]" : rawText, userImages);
-        history.add(userMsg);
-
-        MessageBubble userBubble = new MessageBubble(ChatMessage.Role.USER, rawText.isEmpty() ? "[image]" : rawText, userImages, project);
-        appendComponent(userBubble);
-
-        clearAttachments();
-
-        ChatMessage contextMsg = new ChatMessage(ChatMessage.Role.USER, messageWithContext, userImages);
-        List<ChatMessage> payload = new ArrayList<>(history.subList(0, history.size() - 1));
-        payload.add(contextMsg);
-
-        MessageBubble assistantBubble = new MessageBubble(ChatMessage.Role.ASSISTANT, "", project);
-        appendComponent(assistantBubble);
-
-        sendButton.setEnabled(false);
-        stopButton.setVisible(true);
-
-        StringBuilder fullResponse = new StringBuilder();
-        PluginSettings settings = PluginSettings.getInstance();
-        LLMClient client = buildClient();
-
-        streamingThread = new Thread(() -> {
-            client.streamChat(
-                payload,
-                settings.getSystemPrompt(),
-                imageBase64List,
-                token -> SwingUtilities.invokeLater(() -> {
-                    fullResponse.append(token);
-                    assistantBubble.appendToken(token);
-                    scrollToBottom();
-                }),
-                () -> SwingUtilities.invokeLater(() -> {
-                    history.add(new ChatMessage(ChatMessage.Role.ASSISTANT, fullResponse.toString()));
-                    sendButton.setEnabled(true);
-                    stopButton.setVisible(false);
-                    streamingThread = null;
-                    scrollToBottom();
-                }),
-                err -> SwingUtilities.invokeLater(() -> {
-                    assistantBubble.setText("[Error: " + err.getMessage() + "]");
-                    sendButton.setEnabled(true);
-                    stopButton.setVisible(false);
-                    streamingThread = null;
-                })
-            );
-        }, "llm-stream");
-        streamingThread.setDaemon(true);
-        streamingThread.start();
-    }
-
-    public void sendText(String text) {
-        SwingUtilities.invokeLater(() -> {
-            inputArea.setText(text);
-            sendMessage();
-        });
-    }
-
-    private void stopStreaming() {
-        if (streamingThread != null) {
-            streamingThread.interrupt();
-        }
-        sendButton.setEnabled(true);
-        stopButton.setVisible(false);
-    }
-
-    private void clearConversation() {
-        history.clear();
-        messagesPanel.removeAll();
-        messagesPanel.revalidate();
-        messagesPanel.repaint();
-    }
-
-    private boolean pasteImageFromClipboard() {
-        try {
-            Transferable contents = Toolkit.getDefaultToolkit().getSystemClipboard().getContents(null);
-            if (contents == null || !contents.isDataFlavorSupported(DataFlavor.imageFlavor)) {
-                return false;
-            }
-            Image image = (Image) contents.getTransferData(DataFlavor.imageFlavor);
-            BufferedImage buffered = toBufferedImage(image);
-            BufferedImage thumbnail = scaleThumbnail(buffered, 120);
-
-            ByteArrayOutputStream baos = new ByteArrayOutputStream();
-            ImageIO.write(buffered, "png", baos);
-            String base64 = Base64.getEncoder().encodeToString(baos.toByteArray());
-
-            ImageAttachment attachment = new ImageAttachment("clipboard.png", base64, "image/png", thumbnail);
-            addImageChip(attachment);
-            return true;
-        } catch (Exception e) {
-            return false;
-        }
-    }
-
-    private void openFilePicker() {
-        JFileChooser chooser = new JFileChooser();
-        chooser.setMultiSelectionEnabled(false);
-
-        javax.swing.filechooser.FileNameExtensionFilter imageFilter =
-            new javax.swing.filechooser.FileNameExtensionFilter("Images", IMAGE_EXTS);
-        javax.swing.filechooser.FileNameExtensionFilter textFilter =
-            new javax.swing.filechooser.FileNameExtensionFilter("Text Files", TEXT_EXTS);
-
-        chooser.addChoosableFileFilter(imageFilter);
-        chooser.addChoosableFileFilter(textFilter);
-        chooser.setAcceptAllFileFilterUsed(true);
-        chooser.setFileFilter(textFilter);
-
-        int result = chooser.showOpenDialog(this);
-        if (result != JFileChooser.APPROVE_OPTION) return;
-
-        File file = chooser.getSelectedFile();
-        String name = file.getName().toLowerCase();
-
-        if (isImageFile(name)) {
-            try {
-                BufferedImage img = ImageIO.read(file);
-                BufferedImage thumbnail = scaleThumbnail(img, 120);
-                byte[] bytes = Files.readAllBytes(file.toPath());
-                String base64 = Base64.getEncoder().encodeToString(bytes);
-                String mime = name.endsWith(".png") ? "image/png" :
-                              name.endsWith(".gif") ? "image/gif" :
-                              name.endsWith(".webp") ? "image/webp" : "image/jpeg";
-                addImageChip(new ImageAttachment(file.getName(), base64, mime, thumbnail));
-            } catch (Exception e) {
-                JOptionPane.showMessageDialog(this, "Failed to load image: " + e.getMessage());
-            }
-        } else {
-            try {
-                String content = Files.readString(file.toPath(), StandardCharsets.UTF_8);
-                addTextChip(new TextAttachment(file.getName(), content));
-            } catch (Exception e) {
-                JOptionPane.showMessageDialog(this, "Failed to read file: " + e.getMessage());
-            }
-        }
-    }
-
-    private void addImageChip(ImageAttachment attachment) {
-        pendingImages.add(attachment);
-        FileChip chip = new FileChip(attachment, () -> {
-            pendingImages.remove(attachment);
-            rebuildChips();
-        });
-        attachmentPanel.add(chip);
-        attachmentPanel.setVisible(true);
-        attachmentPanel.revalidate();
-    }
-
-    private void addTextChip(TextAttachment attachment) {
-        pendingFiles.add(attachment);
-        FileChip chip = new FileChip(attachment, () -> {
-            pendingFiles.remove(attachment);
-            rebuildChips();
-        });
-        attachmentPanel.add(chip);
-        attachmentPanel.setVisible(true);
-        attachmentPanel.revalidate();
-    }
-
-    private void rebuildChips() {
-        attachmentPanel.removeAll();
-        for (ImageAttachment img : pendingImages) {
-            attachmentPanel.add(new FileChip(img, () -> { pendingImages.remove(img); rebuildChips(); }));
-        }
-        for (TextAttachment txt : pendingFiles) {
-            attachmentPanel.add(new FileChip(txt, () -> { pendingFiles.remove(txt); rebuildChips(); }));
-        }
-        attachmentPanel.setVisible(attachmentPanel.getComponentCount() > 0);
-        attachmentPanel.revalidate();
-        attachmentPanel.repaint();
-    }
-
-    private void clearAttachments() {
-        pendingImages.clear();
-        pendingFiles.clear();
-        attachmentPanel.removeAll();
-        attachmentPanel.setVisible(false);
-        attachmentPanel.revalidate();
-    }
-
-    public void attachVirtualFile(VirtualFile vf) {
-        contextBuilder.attachFile(vf);
-        try {
-            String content = new String(vf.contentsToByteArray(), StandardCharsets.UTF_8);
-            addTextChip(new TextAttachment(vf.getName(), content));
-        } catch (Exception e) {
-            JOptionPane.showMessageDialog(this, "Failed to attach file: " + e.getMessage());
-        }
-    }
-
-    private void appendComponent(JComponent component) {
-        SwingUtilities.invokeLater(() -> {
-            messagesPanel.add(component);
-            messagesPanel.add(Box.createVerticalStrut(6));
-            messagesPanel.revalidate();
-            scrollToBottom();
-        });
-    }
-
-    private void scrollToBottom() {
-        SwingUtilities.invokeLater(() -> {
-            JScrollBar bar = messagesScroll.getVerticalScrollBar();
-            bar.setValue(bar.getMaximum());
-        });
-    }
-
-    private LLMClient buildClient() {
+    private void loadSettings() {
         PluginSettings s = PluginSettings.getInstance();
-        if (s.getSelectedBackend() == PluginSettings.Backend.OLLAMA) {
-            return new OllamaClient(s.getOllamaBaseUrl(), s.getSelectedModel());
+        endpointField.setText(s.getEndpoint());
+        if (s.getModel() != null && !s.getModel().isBlank()) {
+            modelCombo.addItem(s.getModel());
+            modelCombo.setSelectedItem(s.getModel());
         }
-        return new LMStudioClient(s.getLmStudioBaseUrl(), s.getSelectedModel(),
-                s.getMaxTokens(), s.getTemperature());
     }
 
-    private boolean isImageFile(String name) {
-        for (String ext : IMAGE_EXTS) {
-            if (name.endsWith("." + ext)) return true;
-        }
-        return false;
+    private void saveSettings() {
+        PluginSettings s = PluginSettings.getInstance();
+        s.setEndpoint(endpointField.getText().trim());
+        Object sel = modelCombo.getSelectedItem();
+        if (sel != null) s.setModel(sel.toString());
+        setStatus("Settings saved.");
     }
 
-    private BufferedImage toBufferedImage(Image img) {
-        if (img instanceof BufferedImage bi) return bi;
-        BufferedImage bi = new BufferedImage(
-            img.getWidth(null), img.getHeight(null), BufferedImage.TYPE_INT_ARGB);
-        Graphics2D g = bi.createGraphics();
-        g.drawImage(img, 0, 0, null);
-        g.dispose();
-        return bi;
-    }
+    // -------------------------------------------------------------------------
+    // API calls — network on daemon thread, UI update on EDT
+    // -------------------------------------------------------------------------
 
-    private BufferedImage scaleThumbnail(BufferedImage src, int maxSize) {
-        int w = src.getWidth(), h = src.getHeight();
-        if (w <= maxSize && h <= maxSize) return src;
-        if (w > h) {
-            h = h * maxSize / w;
-            w = maxSize;
-        } else {
-            w = w * maxSize / h;
-            h = maxSize;
-        }
-        BufferedImage scaled = new BufferedImage(w, h, BufferedImage.TYPE_INT_ARGB);
-        Graphics2D g = scaled.createGraphics();
-        g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BILINEAR);
-        g.drawImage(src, 0, 0, w, h, null);
-        g.dispose();
-        return scaled;
-    }
+    private void refreshModels() {
+        String endpoint = endpointField.getText().trim();
+        setLoading(true);
+        setStatus("Fetching models…");
 
-    private void setupFileDrop() {
-        setDropTarget(new DropTarget() {
-            @Override
-            public synchronized void drop(DropTargetDropEvent event) {
-                event.acceptDrop(DnDConstants.ACTION_COPY);
-                try {
-                    @SuppressWarnings("unchecked")
-                    List<java.io.File> files = (List<java.io.File>)
-                        event.getTransferable().getTransferData(DataFlavor.javaFileListFlavor);
-                    for (java.io.File f : files) {
-                        VirtualFile vf = LocalFileSystem.getInstance().findFileByIoFile(f);
-                        if (vf != null) attachVirtualFile(vf);
-                    }
-                } catch (Exception ignored) {
-                }
+        daemon(() -> {
+            try {
+                List<String> models = new LMStudioClient(endpoint).fetchModels();
+                SwingUtilities.invokeLater(() -> {
+                    modelCombo.removeAllItems();
+                    models.forEach(modelCombo::addItem);
+                    String saved = PluginSettings.getInstance().getModel();
+                    if (models.contains(saved)) modelCombo.setSelectedItem(saved);
+                    setStatus("Loaded " + models.size() + " model(s).");
+                    setLoading(false);
+                });
+            } catch (Exception ex) {
+                SwingUtilities.invokeLater(() -> {
+                    setStatus("Error: " + ex.getMessage());
+                    setLoading(false);
+                });
             }
         });
+    }
+
+    private void sendMessage() {
+        String text = promptField.getText().trim();
+        if (text.isEmpty()) return;
+
+        Object sel = modelCombo.getSelectedItem();
+        if (sel == null || sel.toString().isBlank()) {
+            appendChat("System", "Please select a model first (open Settings → Refresh Models).");
+            return;
+        }
+
+        String model    = sel.toString();
+        String endpoint = endpointField.getText().trim();
+
+        appendChat("You", text);
+        history.add(new ChatMessage("user", text));
+        promptField.setText("");
+        setLoading(true);
+
+        List<ChatMessage> snapshot = new ArrayList<>(history);
+        daemon(() -> {
+            try {
+                String reply = new LMStudioClient(endpoint).chat(model, snapshot);
+                SwingUtilities.invokeLater(() -> {
+                    history.add(new ChatMessage("assistant", reply));
+                    appendChat("Assistant", reply);
+                    setLoading(false);
+                });
+            } catch (Exception ex) {
+                SwingUtilities.invokeLater(() -> {
+                    appendChat("Error", ex.getMessage());
+                    setLoading(false);
+                });
+            }
+        });
+    }
+
+    // -------------------------------------------------------------------------
+    // UI helpers — call only on EDT
+    // -------------------------------------------------------------------------
+
+    private void appendChat(String role, String content) {
+        chatArea.append(role + ":\n" + content + "\n\n");
+        chatArea.setCaretPosition(chatArea.getDocument().getLength());
+    }
+
+    private void setLoading(boolean loading) {
+        sendBtn.setEnabled(!loading);
+        refreshBtn.setEnabled(!loading);
+        spinner.setIndeterminate(loading);
+        spinner.setVisible(loading);
+    }
+
+    private void setStatus(String msg) {
+        statusLabel.setText(msg);
+    }
+
+    private static void daemon(Runnable r) {
+        Thread t = new Thread(r);
+        t.setDaemon(true);
+        t.start();
+    }
+
+    // -------------------------------------------------------------------------
+    // Public API for ChatToolWindowFactory
+    // -------------------------------------------------------------------------
+
+    public JPanel getSwingComponent() {
+        return root;
     }
 }

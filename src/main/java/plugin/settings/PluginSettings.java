@@ -7,26 +7,12 @@ import com.intellij.openapi.components.Storage;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
-@State(
-    name = "LocalLLMPluginSettings",
-    storages = @Storage("LocalLLMAssistant.xml")
-)
+@State(name = "LocalLLMSettings", storages = @Storage("localLlm.xml"))
 public class PluginSettings implements PersistentStateComponent<PluginSettings.State> {
 
-    public enum Backend {
-        OLLAMA, LM_STUDIO
-    }
-
     public static class State {
-        public Backend selectedBackend = Backend.OLLAMA;
-        public String ollamaBaseUrl = "http://localhost:11434";
-        public String lmStudioBaseUrl = "http://localhost:1234";
-        public String selectedModel = "";
-        public String systemPrompt = "You are a helpful coding assistant.";
-        public boolean streamingEnabled = true;
-        public int maxTokens = 4096;
-        public double temperature = 0.7;
-        public boolean autoApplyEdits = false;
+        public String endpoint = "http://127.0.0.1:1234";
+        public String model    = "qwen2.5-coder-7b-instruct";
     }
 
     private State state = new State();
@@ -45,79 +31,8 @@ public class PluginSettings implements PersistentStateComponent<PluginSettings.S
         this.state = state;
     }
 
-    public Backend getSelectedBackend() {
-        return state.selectedBackend;
-    }
-
-    public void setSelectedBackend(Backend backend) {
-        state.selectedBackend = backend;
-    }
-
-    public String getOllamaBaseUrl() {
-        return state.ollamaBaseUrl;
-    }
-
-    public void setOllamaBaseUrl(String url) {
-        state.ollamaBaseUrl = url;
-    }
-
-    public String getLmStudioBaseUrl() {
-        return state.lmStudioBaseUrl;
-    }
-
-    public void setLmStudioBaseUrl(String url) {
-        state.lmStudioBaseUrl = url;
-    }
-
-    public String getSelectedModel() {
-        return state.selectedModel;
-    }
-
-    public void setSelectedModel(String model) {
-        state.selectedModel = model;
-    }
-
-    public String getSystemPrompt() {
-        return state.systemPrompt;
-    }
-
-    public void setSystemPrompt(String prompt) {
-        state.systemPrompt = prompt;
-    }
-
-    public boolean isStreamingEnabled() {
-        return state.streamingEnabled;
-    }
-
-    public void setStreamingEnabled(boolean enabled) {
-        state.streamingEnabled = enabled;
-    }
-
-    public int getMaxTokens() {
-        return state.maxTokens;
-    }
-
-    public void setMaxTokens(int tokens) {
-        state.maxTokens = tokens;
-    }
-
-    public double getTemperature() {
-        return state.temperature;
-    }
-
-    public void setTemperature(double temperature) {
-        state.temperature = temperature;
-    }
-
-    public boolean isAutoApplyEdits() {
-        return state.autoApplyEdits;
-    }
-
-    public void setAutoApplyEdits(boolean autoApply) {
-        state.autoApplyEdits = autoApply;
-    }
-
-    public String getActiveBaseUrl() {
-        return state.selectedBackend == Backend.OLLAMA ? state.ollamaBaseUrl : state.lmStudioBaseUrl;
-    }
+    public String getEndpoint()          { return state.endpoint; }
+    public void   setEndpoint(String v)  { state.endpoint = v; }
+    public String getModel()             { return state.model; }
+    public void   setModel(String v)     { state.model = v; }
 }
