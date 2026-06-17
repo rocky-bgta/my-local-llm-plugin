@@ -12,6 +12,7 @@ import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.function.Consumer;
 
 public class LMStudioClient {
 
@@ -41,35 +42,50 @@ public class LMStudioClient {
         return ids;
     }
 
-    public String chat(String model, List<ChatMessage> messages) throws Exception {
-        JsonObject body = new JsonObject();
-        body.addProperty("model", model);
-        body.addProperty("stream", false);
-
-        JsonArray msgs = new JsonArray();
-        for (ChatMessage m : messages) {
-            JsonObject msg = new JsonObject();
-            msg.addProperty("role", m.role());
-            msg.addProperty("content", m.content());
-            msgs.add(msg);
-        }
-        body.add("messages", msgs);
+    // Streams the assistant reply token-by-token via SSE.
+    // Blocks until the server sends [DONE]. onToken is called for each text chunk.
+    public void streamChat(String model, List<ChatMessage> messages,
+                           Consumer<String> onToken) throws Exception {
+        JsonObject body = buildBody(model, messages);
 
         HttpRequest req = HttpRequest.newBuilder()
                 .uri(URI.create(baseUrl + "/v1/chat/completions"))
                 .header("Content-Type", "application/json")
-                .header("Accept", "application/json")
+                .header("Accept",       "text/event-stream")
                 .POST(HttpRequest.BodyPublishers.ofString(body.toString()))
                 .timeout(Duration.ofSeconds(120))
                 .build();
 
-        HttpResponse<String> res = http.send(req, HttpResponse.BodyHandlers.ofString());
+        var res = http.send(req, HttpResponse.BodyHandlers.ofLines());
+        res.body().forEach(line -> {
+            if (!line.startsWith("data: ")) return;
+            String data = line.substring(6).trim();
+            if ("[DONE]".equals(data)) return;
+            try {
+                JsonObject obj    = JsonParser.parseString(data).getAsJsonObject();
+                JsonArray choices = obj.getAsJsonArray("choices");
+                if (choices == null || choices.isEmpty()) return;
+                JsonObject delta  = choices.get(0).getAsJsonObject().getAsJsonObject("delta");
+                if (delta == null || !delta.has("content") || delta.get("content").isJsonNull()) return;
+                String token      = delta.get("content").getAsString();
+                if (!token.isEmpty()) onToken.accept(token);
+            } catch (Exception ignored) {}
+        });
+    }
 
-        JsonObject response = JsonParser.parseString(res.body()).getAsJsonObject();
-        return response
-                .getAsJsonArray("choices")
-                .get(0).getAsJsonObject()
-                .getAsJsonObject("message")
-                .get("content").getAsString();
+    private JsonObject buildBody(String model, List<ChatMessage> messages) {
+        JsonObject body = new JsonObject();
+        body.addProperty("model",  model);
+        body.addProperty("stream", true);
+
+        JsonArray msgs = new JsonArray();
+        for (ChatMessage m : messages) {
+            JsonObject msg = new JsonObject();
+            msg.addProperty("role",    m.role());
+            msg.addProperty("content", m.content());
+            msgs.add(msg);
+        }
+        body.add("messages", msgs);
+        return body;
     }
 }

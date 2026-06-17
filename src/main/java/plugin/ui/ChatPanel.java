@@ -9,6 +9,7 @@ import plugin.settings.PluginSettings;
 
 import javax.swing.*;
 import javax.swing.border.EmptyBorder;
+import javax.swing.text.*;
 import java.awt.*;
 import java.awt.event.KeyAdapter;
 import java.awt.event.KeyEvent;
@@ -19,29 +20,55 @@ public class ChatPanel {
 
     private final JPanel root;
 
-    private JTextArea    chatArea;
+    // Chat display
+    private JTextPane      chatPane;
+    private StyledDocument chatDoc;
+
+    // Input
     private JTextArea    promptArea;
     private JButton      sendBtn;
     private JProgressBar spinner;
 
+    // Streaming state (all accessed on EDT only)
+    private final Timer         blinkTimer;
+    private       boolean       streaming       = false;
+    private       boolean       cursorOn        = false;
+    private final StringBuilder assistantBuffer = new StringBuilder();
+
+    // Conversation history
     private final List<ChatMessage> history = new ArrayList<>();
 
+    // Text styles
+    private Style userRoleStyle;
+    private Style userTextStyle;
+    private Style assistantRoleStyle;
+    private Style assistantTextStyle;
+    private Style systemStyle;
+    private Style cursorStyle;
+
     public ChatPanel(@NotNull Project project) {
-        root = new JPanel(new BorderLayout(0, 0));
+        blinkTimer = new Timer(500, e -> toggleBlink());
+        blinkTimer.setRepeats(true);
+
+        root = new JPanel(new BorderLayout());
         root.add(buildToolbar(),    BorderLayout.NORTH);
         root.add(buildChatArea(),   BorderLayout.CENTER);
         root.add(buildInputPanel(), BorderLayout.SOUTH);
     }
 
     // -------------------------------------------------------------------------
-    // Toolbar with gear icon
+    // Toolbar — title on the left, gear on the right
     // -------------------------------------------------------------------------
 
     private JPanel buildToolbar() {
         JPanel bar = new JPanel(new BorderLayout());
         bar.setBorder(BorderFactory.createMatteBorder(
-                0, 0, 1, 0,
-                UIManager.getColor("Separator.foreground")));
+                0, 0, 1, 0, UIManager.getColor("Separator.foreground")));
+        bar.setPreferredSize(new Dimension(0, 32));
+
+        JLabel title = new JLabel("  Local LLM");
+        title.setFont(title.getFont().deriveFont(Font.BOLD, 13f));
+        bar.add(title, BorderLayout.WEST);
 
         JButton gearBtn = new JButton(AllIcons.General.Settings);
         gearBtn.setBorderPainted(false);
@@ -51,23 +78,22 @@ public class ChatPanel {
         gearBtn.setToolTipText("Settings");
         gearBtn.addActionListener(e -> showSettingsDialog());
 
-        JPanel right = new JPanel(new FlowLayout(FlowLayout.RIGHT, 4, 2));
+        JPanel right = new JPanel(new FlowLayout(FlowLayout.RIGHT, 6, 4));
         right.setOpaque(false);
         right.add(gearBtn);
-
         bar.add(right, BorderLayout.EAST);
+
         return bar;
     }
 
     // -------------------------------------------------------------------------
-    // Settings dialog (opens on gear click)
+    // Settings dialog
     // -------------------------------------------------------------------------
 
     private void showSettingsDialog() {
         Window parent = SwingUtilities.getWindowAncestor(root);
         JDialog dialog = new JDialog(parent, "Settings", Dialog.ModalityType.APPLICATION_MODAL);
-        dialog.setLayout(new BorderLayout());
-        dialog.add(buildSettingsForm(dialog), BorderLayout.CENTER);
+        dialog.add(buildSettingsForm(dialog));
         dialog.pack();
         dialog.setMinimumSize(new Dimension(380, dialog.getHeight()));
         dialog.setLocationRelativeTo(root);
@@ -76,9 +102,9 @@ public class ChatPanel {
     }
 
     private JPanel buildSettingsForm(JDialog dialog) {
-        PluginSettings settings = PluginSettings.getInstance();
+        PluginSettings s = PluginSettings.getInstance();
 
-        JTextField        endpointField = new JTextField(settings.getEndpoint(), 28);
+        JTextField        endpointField = new JTextField(s.getEndpoint(), 28);
         JComboBox<String> modelCombo    = new JComboBox<>();
         JLabel            statusLabel   = new JLabel(" ");
         JButton           refreshBtn    = new JButton("Refresh Models");
@@ -86,9 +112,9 @@ public class ChatPanel {
 
         statusLabel.setFont(statusLabel.getFont().deriveFont(Font.ITALIC, 11f));
 
-        if (settings.getModel() != null && !settings.getModel().isBlank()) {
-            modelCombo.addItem(settings.getModel());
-            modelCombo.setSelectedItem(settings.getModel());
+        if (s.getModel() != null && !s.getModel().isBlank()) {
+            modelCombo.addItem(s.getModel());
+            modelCombo.setSelectedItem(s.getModel());
         }
 
         refreshBtn.addActionListener(e -> {
@@ -101,9 +127,8 @@ public class ChatPanel {
                     SwingUtilities.invokeLater(() -> {
                         modelCombo.removeAllItems();
                         models.forEach(modelCombo::addItem);
-                        String saved = settings.getModel();
-                        if (saved != null && models.contains(saved)) {
-                            modelCombo.setSelectedItem(saved);
+                        if (s.getModel() != null && models.contains(s.getModel())) {
+                            modelCombo.setSelectedItem(s.getModel());
                         }
                         statusLabel.setText("Loaded " + models.size() + " model(s).");
                         refreshBtn.setEnabled(true);
@@ -118,15 +143,12 @@ public class ChatPanel {
         });
 
         saveBtn.addActionListener(e -> {
-            settings.setEndpoint(endpointField.getText().trim());
+            s.setEndpoint(endpointField.getText().trim());
             Object sel = modelCombo.getSelectedItem();
-            if (sel != null && !sel.toString().isBlank()) {
-                settings.setModel(sel.toString());
-            }
+            if (sel != null && !sel.toString().isBlank()) s.setModel(sel.toString());
             dialog.dispose();
         });
 
-        // Layout
         JPanel form = new JPanel(new GridBagLayout());
         form.setBorder(new EmptyBorder(14, 18, 14, 18));
 
@@ -149,46 +171,80 @@ public class ChatPanel {
         return form;
     }
 
-    private static void addFormRow(JPanel panel, String labelText, JComponent field,
+    private static void addFormRow(JPanel p, String label, JComponent field,
                                    GridBagConstraints lc, GridBagConstraints fc, int row) {
-        lc.gridx = 0; lc.gridy = row;
-        panel.add(new JLabel(labelText), lc);
-        fc.gridx = 1; fc.gridy = row;
-        panel.add(field, fc);
+        lc.gridx = 0; lc.gridy = row; p.add(new JLabel(label), lc);
+        fc.gridx = 1; fc.gridy = row; p.add(field, fc);
     }
 
     // -------------------------------------------------------------------------
-    // Chat area
+    // Chat area — styled JTextPane, always-on scroll bar
     // -------------------------------------------------------------------------
 
     private JScrollPane buildChatArea() {
-        chatArea = new JTextArea();
-        chatArea.setEditable(false);
-        chatArea.setLineWrap(true);
-        chatArea.setWrapStyleWord(true);
-        chatArea.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 13));
-        chatArea.setMargin(new Insets(6, 8, 6, 8));
+        chatPane = new JTextPane();
+        chatPane.setEditable(false);
+        chatPane.setMargin(new Insets(10, 12, 10, 12));
+        chatDoc  = chatPane.getStyledDocument();
+        initStyles();
 
-        JScrollPane scroll = new JScrollPane(chatArea);
+        JScrollPane scroll = new JScrollPane(chatPane);
         scroll.setVerticalScrollBarPolicy(ScrollPaneConstants.VERTICAL_SCROLLBAR_ALWAYS);
         scroll.setHorizontalScrollBarPolicy(ScrollPaneConstants.HORIZONTAL_SCROLLBAR_NEVER);
         return scroll;
     }
 
+    private void initStyles() {
+        Style base = StyleContext.getDefaultStyleContext()
+                                 .getStyle(StyleContext.DEFAULT_STYLE);
+
+        userRoleStyle = chatPane.addStyle("userRole", base);
+        StyleConstants.setForeground(userRoleStyle, new Color(0x4EC9B0));
+        StyleConstants.setBold(userRoleStyle, true);
+        StyleConstants.setFontSize(userRoleStyle, 12);
+
+        userTextStyle = chatPane.addStyle("userText", base);
+        StyleConstants.setForeground(userTextStyle, new Color(0xD4D4D4));
+        StyleConstants.setFontFamily(userTextStyle, Font.SANS_SERIF);
+        StyleConstants.setFontSize(userTextStyle, 13);
+
+        assistantRoleStyle = chatPane.addStyle("assistantRole", base);
+        StyleConstants.setForeground(assistantRoleStyle, new Color(0x569CD6));
+        StyleConstants.setBold(assistantRoleStyle, true);
+        StyleConstants.setFontSize(assistantRoleStyle, 12);
+
+        assistantTextStyle = chatPane.addStyle("assistantText", base);
+        StyleConstants.setForeground(assistantTextStyle, new Color(0xE8E8E8));
+        StyleConstants.setFontFamily(assistantTextStyle, Font.MONOSPACED);
+        StyleConstants.setFontSize(assistantTextStyle, 13);
+
+        systemStyle = chatPane.addStyle("system", base);
+        StyleConstants.setForeground(systemStyle, new Color(0xCE9178));
+        StyleConstants.setItalic(systemStyle, true);
+        StyleConstants.setFontSize(systemStyle, 11);
+
+        cursorStyle = chatPane.addStyle("cursor", base);
+        StyleConstants.setForeground(cursorStyle, new Color(0x569CD6));
+        StyleConstants.setBold(cursorStyle, true);
+    }
+
     // -------------------------------------------------------------------------
-    // Input row (prompt + Send / Clear + spinner)
+    // Input panel — 4-row textarea, Send bottom-right, Clear bottom-left
     // -------------------------------------------------------------------------
 
     private JPanel buildInputPanel() {
-        JPanel panel = new JPanel(new BorderLayout(0, 4));
-        panel.setBorder(new EmptyBorder(6, 8, 8, 8));
+        JPanel panel = new JPanel(new BorderLayout(0, 6));
+        panel.setBorder(BorderFactory.createCompoundBorder(
+                BorderFactory.createMatteBorder(1, 0, 0, 0,
+                        UIManager.getColor("Separator.foreground")),
+                new EmptyBorder(8, 10, 10, 10)));
 
-        // Multi-line input — Enter sends, Shift+Enter inserts newline
-        promptArea = new JTextArea(3, 0);
+        promptArea = new JTextArea(4, 0);
         promptArea.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 13));
         promptArea.setLineWrap(true);
         promptArea.setWrapStyleWord(true);
-        promptArea.setMargin(new Insets(4, 6, 4, 6));
+        promptArea.setMargin(new Insets(6, 8, 6, 8));
+        // Enter = send   |   Shift+Enter = newline
         promptArea.addKeyListener(new KeyAdapter() {
             @Override
             public void keyPressed(KeyEvent e) {
@@ -204,11 +260,12 @@ public class ChatPanel {
         promptScroll.setHorizontalScrollBarPolicy(ScrollPaneConstants.HORIZONTAL_SCROLLBAR_NEVER);
 
         sendBtn = new JButton("Send");
+        sendBtn.setPreferredSize(new Dimension(80, 28));
         sendBtn.addActionListener(e -> sendMessage());
 
         JButton clearBtn = new JButton("Clear");
         clearBtn.addActionListener(e -> {
-            chatArea.setText("");
+            try { chatDoc.remove(0, chatDoc.getLength()); } catch (BadLocationException ignored) {}
             history.clear();
         });
 
@@ -217,13 +274,12 @@ public class ChatPanel {
         spinner.setPreferredSize(new Dimension(80, 14));
         spinner.setVisible(false);
 
-        // Bottom row: Clear + spinner on left, Send on right
-        JPanel ctrlRow = new JPanel(new BorderLayout(4, 0));
+        JPanel ctrlRow  = new JPanel(new BorderLayout(4, 0));
         JPanel leftCtrl = new JPanel(new FlowLayout(FlowLayout.LEFT, 4, 0));
         leftCtrl.add(clearBtn);
         leftCtrl.add(spinner);
-        ctrlRow.add(leftCtrl,  BorderLayout.WEST);
-        ctrlRow.add(sendBtn,   BorderLayout.EAST);
+        ctrlRow.add(leftCtrl, BorderLayout.WEST);
+        ctrlRow.add(sendBtn,  BorderLayout.EAST);
 
         panel.add(promptScroll, BorderLayout.CENTER);
         panel.add(ctrlRow,      BorderLayout.SOUTH);
@@ -231,39 +287,44 @@ public class ChatPanel {
     }
 
     // -------------------------------------------------------------------------
-    // API calls — network on daemon thread, UI updates on EDT
+    // Send — streams response token by token
     // -------------------------------------------------------------------------
 
     private void sendMessage() {
         String text = promptArea.getText().trim();
         if (text.isEmpty()) return;
 
-        PluginSettings s    = PluginSettings.getInstance();
-        String model        = s.getModel();
-        String endpoint     = s.getEndpoint();
+        PluginSettings s  = PluginSettings.getInstance();
+        String model      = s.getModel();
+        String endpoint   = s.getEndpoint();
 
         if (model == null || model.isBlank()) {
-            appendChat("System", "No model configured — click ⚙ to open Settings.");
+            appendSystemMessage("No model configured — click ⚙ to open Settings.");
             return;
         }
 
-        appendChat("You", text);
+        appendUserMessage(text);
         history.add(new ChatMessage("user", text));
         promptArea.setText("");
+
+        beginAssistantMessage();
+        blinkTimer.start();
         setLoading(true);
 
         List<ChatMessage> snapshot = new ArrayList<>(history);
         daemon(() -> {
             try {
-                String reply = new LMStudioClient(endpoint).chat(model, snapshot);
+                new LMStudioClient(endpoint).streamChat(model, snapshot,
+                        token -> SwingUtilities.invokeLater(() -> appendToken(token)));
                 SwingUtilities.invokeLater(() -> {
-                    history.add(new ChatMessage("assistant", reply));
-                    appendChat("Assistant", reply);
+                    finalizeAssistantMessage();
+                    history.add(new ChatMessage("assistant", assistantBuffer.toString()));
                     setLoading(false);
                 });
             } catch (Exception ex) {
                 SwingUtilities.invokeLater(() -> {
-                    appendChat("Error", ex.getMessage());
+                    finalizeAssistantMessage();
+                    appendSystemMessage("Error: " + ex.getMessage());
                     setLoading(false);
                 });
             }
@@ -271,13 +332,79 @@ public class ChatPanel {
     }
 
     // -------------------------------------------------------------------------
-    // UI helpers
+    // Document helpers — EDT only
     // -------------------------------------------------------------------------
 
-    private void appendChat(String role, String content) {
-        chatArea.append(role + ":\n" + content + "\n\n");
-        chatArea.setCaretPosition(chatArea.getDocument().getLength());
+    private void appendUserMessage(String text) {
+        insert("You\n", userRoleStyle);
+        insert(text + "\n\n", userTextStyle);
     }
+
+    private void beginAssistantMessage() {
+        streaming = true;
+        cursorOn  = false;
+        assistantBuffer.setLength(0);
+        insert("Assistant\n", assistantRoleStyle);
+    }
+
+    private void appendToken(String token) {
+        assistantBuffer.append(token);
+        removeCursorIfPresent();
+        insert(token, assistantTextStyle);
+        insert("▌", cursorStyle);
+        cursorOn = true;
+        chatPane.setCaretPosition(chatDoc.getLength());
+    }
+
+    private void finalizeAssistantMessage() {
+        streaming = false;
+        blinkTimer.stop();
+        removeCursorIfPresent();
+        insert("\n\n", assistantTextStyle);
+        chatPane.setCaretPosition(chatDoc.getLength());
+    }
+
+    private void toggleBlink() {
+        if (!streaming) return;
+        try {
+            int end = chatDoc.getLength();
+            if (cursorOn) {
+                if (end > 0 && chatDoc.getText(end - 1, 1).equals("▌")) {
+                    chatDoc.remove(end - 1, 1);
+                }
+                cursorOn = false;
+            } else {
+                if (end == 0 || !chatDoc.getText(end - 1, 1).equals("▌")) {
+                    chatDoc.insertString(end, "▌", cursorStyle);
+                }
+                cursorOn = true;
+            }
+        } catch (BadLocationException ignored) {}
+    }
+
+    private void appendSystemMessage(String text) {
+        insert(text + "\n\n", systemStyle);
+        chatPane.setCaretPosition(chatDoc.getLength());
+    }
+
+    private void insert(String text, Style style) {
+        try {
+            chatDoc.insertString(chatDoc.getLength(), text, style);
+        } catch (BadLocationException ignored) {}
+    }
+
+    private void removeCursorIfPresent() {
+        try {
+            int end = chatDoc.getLength();
+            if (end > 0 && chatDoc.getText(end - 1, 1).equals("▌")) {
+                chatDoc.remove(end - 1, 1);
+            }
+        } catch (BadLocationException ignored) {}
+    }
+
+    // -------------------------------------------------------------------------
+    // Utilities
+    // -------------------------------------------------------------------------
 
     private void setLoading(boolean loading) {
         sendBtn.setEnabled(!loading);
