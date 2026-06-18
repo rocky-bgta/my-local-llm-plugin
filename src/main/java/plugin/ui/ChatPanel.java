@@ -3,6 +3,7 @@ package plugin.ui;
 import com.intellij.icons.AllIcons;
 import com.intellij.openapi.project.Project;
 import org.jetbrains.annotations.NotNull;
+import plugin.context.ProjectContextBuilder;
 import plugin.llm.LMStudioClient;
 import plugin.llm.model.ChatMessage;
 import plugin.settings.PluginSettings;
@@ -18,7 +19,8 @@ import java.util.List;
 
 public class ChatPanel {
 
-    private final JPanel root;
+    private final JPanel   root;
+    private final Project  project;
 
     // Chat display
     private JTextPane      chatPane;
@@ -47,6 +49,7 @@ public class ChatPanel {
     private Style cursorStyle;
 
     public ChatPanel(@NotNull Project project) {
+        this.project = project;
         blinkTimer = new Timer(500, e -> toggleBlink());
         blinkTimer.setRepeats(true);
 
@@ -311,7 +314,14 @@ public class ChatPanel {
         blinkTimer.start();
         setLoading(true);
 
+        // Build enriched prompt with live IDE context (current file, selection, tree).
+        // The UI always shows the clean user text; only the LLM snapshot gets enriched.
+        String enriched = new ProjectContextBuilder(project).buildEnrichedPrompt(text);
+
+        // Copy history but replace the last user message with the context-enriched version.
         List<ChatMessage> snapshot = new ArrayList<>(history);
+        snapshot.set(snapshot.size() - 1, new ChatMessage("user", enriched));
+
         daemon(() -> {
             try {
                 new LMStudioClient(endpoint).streamChat(model, snapshot,
