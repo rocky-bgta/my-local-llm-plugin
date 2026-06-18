@@ -51,8 +51,7 @@ public class ChatPanel {
 
     // Input
     private JTextArea    promptArea;
-    private JButton      sendBtn;
-    private JButton      stopBtn;
+    private JButton      sendBtn;      // toggles between ▶ send and ■ stop
     private JProgressBar spinner;
 
     // Streaming state (all accessed on EDT only)
@@ -310,7 +309,12 @@ public class ChatPanel {
             public void keyPressed(KeyEvent e) {
                 if (e.getKeyCode() == KeyEvent.VK_ENTER && !e.isShiftDown()) {
                     e.consume();
-                    sendMessage();
+                    if (streaming) {
+                        Thread t = streamThread;
+                        if (t != null) t.interrupt();
+                    } else {
+                        sendMessage();
+                    }
                 }
             }
         });
@@ -357,7 +361,8 @@ public class ChatPanel {
         promptScroll.setHorizontalScrollBarPolicy(ScrollPaneConstants.HORIZONTAL_SCROLLBAR_NEVER);
 
         // ── Buttons ───────────────────────────────────────────────────────────
-        // ── Send button — arrow icon, blue accent ─────────────────────────────
+        // ── Send / Stop toggle button ─────────────────────────────────────────
+        // Blue ▶ when idle → Red ■ while streaming. One button, two roles.
         sendBtn = new JButton("▶");
         sendBtn.setFont(sendBtn.getFont().deriveFont(Font.BOLD, 15f));
         sendBtn.setPreferredSize(new Dimension(46, 32));
@@ -368,20 +373,13 @@ public class ChatPanel {
         sendBtn.setOpaque(true);
         sendBtn.setBorderPainted(false);
         sendBtn.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
-        sendBtn.addActionListener(e -> sendMessage());
-
-        // ── Stop button — visible only while streaming ─────────────────────────
-        stopBtn = new JButton(AllIcons.Actions.Suspend);
-        stopBtn.setToolTipText("Stop generation");
-        stopBtn.setPreferredSize(new Dimension(32, 32));
-        stopBtn.setBorderPainted(false);
-        stopBtn.setContentAreaFilled(false);
-        stopBtn.setFocusPainted(false);
-        stopBtn.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
-        stopBtn.setVisible(false);
-        stopBtn.addActionListener(e -> {
-            Thread t = streamThread;
-            if (t != null) t.interrupt();
+        sendBtn.addActionListener(e -> {
+            if (streaming) {
+                Thread t = streamThread;
+                if (t != null) t.interrupt();
+            } else {
+                sendMessage();
+            }
         });
 
         JButton clearBtn = new JButton("Clear");
@@ -409,11 +407,8 @@ public class ChatPanel {
         leftCtrl.add(clearBtn);
         leftCtrl.add(attachBtn);
         leftCtrl.add(spinner);
-        JPanel rightCtrl = new JPanel(new FlowLayout(FlowLayout.RIGHT, 4, 0));
-        rightCtrl.add(stopBtn);
-        rightCtrl.add(sendBtn);
-        ctrlRow.add(leftCtrl,  BorderLayout.WEST);
-        ctrlRow.add(rightCtrl, BorderLayout.EAST);
+        ctrlRow.add(leftCtrl, BorderLayout.WEST);
+        ctrlRow.add(sendBtn,  BorderLayout.EAST);
 
         panel.add(imagePreviewPanel, BorderLayout.NORTH);
         panel.add(promptScroll,      BorderLayout.CENTER);
@@ -495,9 +490,25 @@ public class ChatPanel {
                 boolean wasStopped = Thread.currentThread().isInterrupted()
                         || ex.getCause() instanceof InterruptedException
                         || ex instanceof java.io.InterruptedIOException;
+                final String partial = assistantBuffer.toString();
                 SwingUtilities.invokeLater(() -> {
                     finalizeAssistantMessage();
-                    if (!wasStopped) appendSystemMessage("Error: " + ex.getMessage());
+                    if (wasStopped) {
+                        // Save partial response so the LLM can see what was already generated
+                        if (!partial.isBlank()) {
+                            history.add(new ChatMessage("assistant", partial));
+                        }
+                        // Silent context note — not shown in UI, but sent to LLM on next turn.
+                        // Enables "resume" to continue from the exact cutoff point.
+                        history.add(new ChatMessage("user",
+                                "[SYSTEM NOTE: The above assistant response was interrupted by " +
+                                "the user mid-generation. The partial content above is what was " +
+                                "generated before the stop. If the user asks to 'resume', " +
+                                "'continue', or 'keep going', seamlessly continue from the exact " +
+                                "cutoff point without repeating anything already written.]"));
+                    } else {
+                        appendSystemMessage("Error: " + ex.getMessage());
+                    }
                     setLoading(false);
                 });
             } finally {
@@ -586,8 +597,15 @@ public class ChatPanel {
     // -------------------------------------------------------------------------
 
     private void setLoading(boolean loading) {
-        sendBtn.setEnabled(!loading);
-        stopBtn.setVisible(loading);
+        if (loading) {
+            sendBtn.setText("■");
+            sendBtn.setBackground(new Color(0xC0392B));
+            sendBtn.setToolTipText("Stop generation (Enter)");
+        } else {
+            sendBtn.setText("▶");
+            sendBtn.setBackground(new Color(0x3574F0));
+            sendBtn.setToolTipText("Send (Enter)");
+        }
         spinner.setIndeterminate(loading);
         spinner.setVisible(loading);
     }
