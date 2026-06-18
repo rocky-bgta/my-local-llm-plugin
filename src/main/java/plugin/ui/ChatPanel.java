@@ -412,6 +412,10 @@ public class ChatPanel {
                     
                     if ("EDITING".equals(mode)) {
                         FileOperationUtil.processFileOperations(project, fullResponse);
+                    } else {
+                        if (fullResponse.contains("<CREATE_FILE") || fullResponse.contains("<MODIFY_FILE") || fullResponse.contains("<CREATE_FOLDER")) {
+                            appendSystemMessage("File operations detected but skipped because current mode is " + mode + ". Switch to EDITING mode to allow file changes.");
+                        }
                     }
                     
                     setLoading(false);

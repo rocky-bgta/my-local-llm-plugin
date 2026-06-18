@@ -40,6 +40,12 @@ target/local-llm-assistant.jar
 
 ---
 
+## Author
+
+- **Jane Smith** (jane.smith@example.com)
+
+--- 
+
 ## Install the Plugin
 
 ### Option A — Install from Disk (recommended for development)
@@ -86,84 +92,4 @@ target/local-llm-assistant.jar
 
 ## Using the Plugin
 
-### Open the Chat Window
-
-After installation, the **Local LLM** tool window appears in the right-side stripe.
-Click it to open the panel.
-
-```
-View → Tool Windows → Local LLM
-```
-
-### Configure Settings
-
-1. Click the **Settings** section header to expand it.
-2. **Server Endpoint** — leave as `http://127.0.0.1:1234` unless you changed LM Studio's port.
-3. Click **Refresh Models** — the model dropdown populates automatically from the running LM Studio server.
-4. Select the model you want to use.
-5. Click **Save Settings** — your endpoint and model are persisted across IDE restarts.
-
-### Chat
-
-1. Type your message in the input field at the bottom of the panel.
-2. Press **Enter** or click **Send**.
-3. The spinner shows while the model is generating a response.
-4. The response appears in the conversation area above.
-5. Click **Clear** to reset the conversation history.
-
----
-
-## Project Structure
-
-```
-my-local-llm-plugin/
-├── pom.xml
-├── README.md
-└── src/main/
-    ├── java/plugin/
-    │   ├── toolwindow/
-    │   │   └── ChatToolWindowFactory.java   # Registers the tool window with IntelliJ
-    │   ├── ui/
-    │   │   └── ChatPanel.java               # JavaFX UI (embedded via JFXPanel)
-    │   ├── settings/
-    │   │   └── PluginSettings.java          # Persistent settings (endpoint, model)
-    │   └── llm/
-    │       ├── LMStudioClient.java          # HTTP client for LM Studio API
-    │       └── model/
-    │           └── ChatMessage.java         # Chat message record (role + content)
-    └── resources/
-        └── META-INF/
-            └── plugin.xml                   # Plugin descriptor
-```
-
----
-
-## API Endpoints Used
-
-| Purpose | Method | URL |
-|---|---|---|
-| List available models | `GET` | `/v1/models` |
-| Send a chat message | `POST` | `/v1/chat/completions` |
-
-LM Studio implements the OpenAI-compatible API, so any OpenAI-compatible
-local server (e.g. Ollama with `ollama serve`) works as a drop-in replacement
-by just changing the endpoint URL.
-
----
-
-## Troubleshooting
-
-**"Error: Connection refused"**
-- Make sure LM Studio's local server is running.
-- Verify the endpoint in Settings matches LM Studio's port.
-
-**Model dropdown is empty after Refresh**
-- A model must be loaded in LM Studio's Server tab before it appears in the list.
-- Check LM Studio is running and the server is started.
-
-**Plugin not visible after install**
-- Make sure you restarted IntelliJ after installation.
-- Check **File → Settings → Plugins → Installed** to confirm it is enabled.
-
-**Build fails with "system path does not exist"**
-- Update `<intellij.lib>` in `pom.xml` to match your actual IntelliJ installation path.
+#
