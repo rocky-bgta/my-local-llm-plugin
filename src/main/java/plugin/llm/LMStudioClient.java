@@ -9,6 +9,7 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
@@ -47,13 +48,14 @@ public class LMStudioClient {
     public void streamChat(String model, List<ChatMessage> messages,
                            Consumer<String> onToken) throws Exception {
         JsonObject body = buildBody(model, messages);
+        byte[] bytes = body.toString().getBytes(StandardCharsets.UTF_8);
 
         HttpRequest req = HttpRequest.newBuilder()
                 .uri(URI.create(baseUrl + "/v1/chat/completions"))
                 .header("Content-Type", "application/json")
                 .header("Accept",       "text/event-stream")
-                .POST(HttpRequest.BodyPublishers.ofString(body.toString()))
-                .timeout(Duration.ofSeconds(120))
+                .POST(HttpRequest.BodyPublishers.ofByteArray(bytes))
+                .timeout(Duration.ofSeconds(180))
                 .build();
 
         var res = http.send(req, HttpResponse.BodyHandlers.ofLines());

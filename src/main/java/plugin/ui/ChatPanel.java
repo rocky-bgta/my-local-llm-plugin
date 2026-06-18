@@ -6,6 +6,8 @@ import org.jetbrains.annotations.NotNull;
 import plugin.llm.LMStudioClient;
 import plugin.llm.model.ChatMessage;
 import plugin.settings.PluginSettings;
+import plugin.util.FileOperationUtil;
+import plugin.util.ProjectContextUtil;
 
 import javax.swing.*;
 import javax.swing.border.EmptyBorder;
@@ -18,7 +20,12 @@ import java.util.List;
 
 public class ChatPanel {
 
+    private final Project project;
     private final JPanel root;
+
+    // Mode
+    private String mode = "PLANNING";
+    private JComboBox<String> modeCombo;
 
     // Chat display
     private JTextPane      chatPane;
@@ -47,6 +54,7 @@ public class ChatPanel {
     private Style cursorStyle;
 
     public ChatPanel(@NotNull Project project) {
+        this.project = project;
         blinkTimer = new Timer(500, e -> toggleBlink());
         blinkTimer.setRepeats(true);
 
@@ -70,6 +78,20 @@ public class ChatPanel {
         title.setFont(title.getFont().deriveFont(Font.BOLD, 13f));
         bar.add(title, BorderLayout.WEST);
 
+        modeCombo = new JComboBox<>(new String[]{"PLANNING", "EDITING", "BYPASS"});
+        modeCombo.setSelectedItem("PLANNING");
+        modeCombo.addActionListener(e -> mode = (String) modeCombo.getSelectedItem());
+
+        JButton clearBtn = new JButton("Clear History");
+        clearBtn.setToolTipText("Clear chat history and start a new conversation");
+        clearBtn.addActionListener(e -> {
+            history.clear();
+            chatDoc = new DefaultStyledDocument();
+            initStyles();
+            chatPane.setStyledDocument(chatDoc);
+            appendSystemMessage("Conversation history cleared.");
+        });
+
         JButton gearBtn = new JButton(AllIcons.General.Settings);
         gearBtn.setBorderPainted(false);
         gearBtn.setContentAreaFilled(false);
@@ -78,8 +100,11 @@ public class ChatPanel {
         gearBtn.setToolTipText("Settings");
         gearBtn.addActionListener(e -> showSettingsDialog());
 
-        JPanel right = new JPanel(new FlowLayout(FlowLayout.RIGHT, 6, 4));
+        JPanel right = new JPanel(new FlowLayout(FlowLayout.RIGHT, 6, 0));
         right.setOpaque(false);
+        right.add(new JLabel("Mode:"));
+        right.add(modeCombo);
+        right.add(clearBtn);
         right.add(gearBtn);
         bar.add(right, BorderLayout.EAST);
 
@@ -109,6 +134,7 @@ public class ChatPanel {
         JLabel            statusLabel   = new JLabel(" ");
         JButton           refreshBtn    = new JButton("Refresh Models");
         JButton           saveBtn       = new JButton("Save");
+        JCheckBox         contextCheck  = new JCheckBox("Include full file contents in context", s.isIncludeFullContext());
 
         statusLabel.setFont(statusLabel.getFont().deriveFont(Font.ITALIC, 11f));
 
@@ -144,6 +170,7 @@ public class ChatPanel {
 
         saveBtn.addActionListener(e -> {
             s.setEndpoint(endpointField.getText().trim());
+            s.setIncludeFullContext(contextCheck.isSelected());
             Object sel = modelCombo.getSelectedItem();
             if (sel != null && !sel.toString().isBlank()) s.setModel(sel.toString());
             dialog.dispose();
@@ -165,8 +192,9 @@ public class ChatPanel {
         addFormRow(form, "Endpoint:", endpointField, lc, fc, 0);
         fc.gridy = 1; form.add(refreshBtn,  fc);
         addFormRow(form, "Model:",    modelCombo,    lc, fc, 2);
-        fc.gridy = 3; form.add(saveBtn,     fc);
-        fc.gridy = 4; form.add(statusLabel, fc);
+        fc.gridy = 3; form.add(contextCheck, fc);
+        fc.gridy = 4; form.add(saveBtn,     fc);
+        fc.gridy = 5; form.add(statusLabel, fc);
 
         return form;
     }
@@ -303,8 +331,59 @@ public class ChatPanel {
             return;
         }
 
+        // Add system message with context if history is empty or it's a new conversation
+        if (history.isEmpty()) {
+            String context = ProjectContextUtil.getProjectContext(project, s.isIncludeFullContext());
+            String systemInstructions = "You are a specialized AI coding assistant for this project. " +
+                    "I have provided you with the project structure and file contents below to help you understand the codebase.\n" +
+                    "Current Mode: " + mode + "\n" +
+                    "When in PLANNING mode, discuss the task and outline the steps. Do not use file operation tags.\n" +
+                    "When in EDITING mode, you can create or modify files/folders. Use the following XML-like tags:\n" +
+                    "<CREATE_FOLDER path=\"path/to/folder\" />\n" +
+                    "<CREATE_FILE path=\"path/to/file\">content</CREATE_FILE>\n" +
+                    "<MODIFY_FILE path=\"path/to/file\">new content</MODIFY_FILE>\n" +
+                    "In EDITING mode, you should execute tasks one by one and inform the user of your progress.\n" +
+                    "When in BYPASS mode, ignore file operations and behave like a general assistant.\n" +
+                    "Maintain the session context until the user says to discard it.\n" +
+                    "If the user asks about the project structure or specific files, use the provided context to answer. " +
+                    "Always refer to the 'Project Structure' section for the complete file hierarchy.";
+            
+            history.add(new ChatMessage("system", systemInstructions));
+
+            // System prompt + context
+            if (context.length() > 6000) {
+                List<String> chunks = ProjectContextUtil.splitIntoChunks(context, 6000);
+                for (int i = 0; i < chunks.size(); i++) {
+                    history.add(new ChatMessage("user", "Project Context (Part " + (i + 1) + "/" + chunks.size() + "):\n" + chunks.get(i)));
+                    history.add(new ChatMessage("assistant", "Received context part " + (i + 1) + ". Please continue."));
+                }
+            } else {
+                history.add(new ChatMessage("user", "Project Context:\n" + context));
+                history.add(new ChatMessage("assistant", "Received project context. How can I help you today?"));
+            }
+        } else {
+            // Update mode in system message if it already exists
+            ChatMessage first = history.get(0);
+            if ("system".equals(first.role())) {
+                String updatedSystemPrompt = first.content().replaceFirst("Current Mode: (PLANNING|EDITING|BYPASS)", "Current Mode: " + mode);
+                history.set(0, new ChatMessage("system", updatedSystemPrompt));
+            }
+        }
+
         appendUserMessage(text);
-        history.add(new ChatMessage("user", text));
+        
+        // Split large user message into chunks if necessary (max 6000 chars per part)
+        if (text.length() > 6000) {
+            List<String> chunks = ProjectContextUtil.splitIntoChunks(text, 6000);
+            for (int i = 0; i < chunks.size() - 1; i++) {
+                history.add(new ChatMessage("user", "Message Part " + (i + 1) + "/" + chunks.size() + ":\n" + chunks.get(i)));
+                history.add(new ChatMessage("assistant", "Part " + (i + 1) + " received. Please send the next part."));
+            }
+            history.add(new ChatMessage("user", "Final Part " + chunks.size() + "/" + chunks.size() + ":\n" + chunks.get(chunks.size() - 1)));
+        } else {
+            history.add(new ChatMessage("user", text));
+        }
+        
         promptArea.setText("");
 
         beginAssistantMessage();
@@ -312,13 +391,29 @@ public class ChatPanel {
         setLoading(true);
 
         List<ChatMessage> snapshot = new ArrayList<>(history);
+        // Basic history management: if too long, keep system prompt and last 6 messages
+        // Trimming more aggressively to stay within context limits
+        if (snapshot.size() > 8) {
+            List<ChatMessage> trimmed = new ArrayList<>();
+            trimmed.add(snapshot.get(0)); // Keep system prompt
+            trimmed.addAll(snapshot.subList(snapshot.size() - 7, snapshot.size()));
+            snapshot = trimmed;
+        }
+
+        List<ChatMessage> finalSnapshot = snapshot;
         daemon(() -> {
             try {
-                new LMStudioClient(endpoint).streamChat(model, snapshot,
+                new LMStudioClient(endpoint).streamChat(model, finalSnapshot,
                         token -> SwingUtilities.invokeLater(() -> appendToken(token)));
                 SwingUtilities.invokeLater(() -> {
                     finalizeAssistantMessage();
-                    history.add(new ChatMessage("assistant", assistantBuffer.toString()));
+                    String fullResponse = assistantBuffer.toString();
+                    history.add(new ChatMessage("assistant", fullResponse));
+                    
+                    if ("EDITING".equals(mode)) {
+                        FileOperationUtil.processFileOperations(project, fullResponse);
+                    }
+                    
                     setLoading(false);
                 });
             } catch (Exception ex) {

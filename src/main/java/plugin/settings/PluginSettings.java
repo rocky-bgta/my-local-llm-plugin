@@ -13,6 +13,7 @@ public class PluginSettings implements PersistentStateComponent<PluginSettings.S
     public static class State {
         public String endpoint = "http://127.0.0.1:1234";
         public String model    = "qwen2.5-coder-7b-instruct";
+        public boolean includeFullContext = true;
     }
 
     private State state = new State();
@@ -35,4 +36,6 @@ public class PluginSettings implements PersistentStateComponent<PluginSettings.S
     public void   setEndpoint(String v)  { state.endpoint = v; }
     public String getModel()             { return state.model; }
     public void   setModel(String v)     { state.model = v; }
+    public boolean isIncludeFullContext() { return state.includeFullContext; }
+    public void setIncludeFullContext(boolean v) { state.includeFullContext = v; }
 }
