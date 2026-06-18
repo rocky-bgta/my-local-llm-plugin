@@ -141,6 +141,26 @@
             <systemPath>${intellij.lib}/intellij.libraries.gson.jar</systemPath>
         </dependency>
 
+        <!-- Required so the compiler can resolve type annotations on FileEditorManager
+             (getSelectedEditorFlow returns StateFlow from kotlinx.coroutines) -->
+        <dependency>
+            <groupId>com.intellij.bundled</groupId>
+            <artifactId>kotlinx-coroutines-core</artifactId>
+            <version>bundled</version>
+            <scope>system</scope>
+            <systemPath>${intellij.lib}/intellij.libraries.kotlinx.coroutines.core.jar</systemPath>
+        </dependency>
+
+        <!-- Required so the compiler can resolve JpsModuleSourceRootType used
+             in ProjectRootManager.getModuleSourceRoots annotations -->
+        <dependency>
+            <groupId>com.intellij.bundled</groupId>
+            <artifactId>jps-model</artifactId>
+            <version>bundled</version>
+            <scope>system</scope>
+            <systemPath>${intellij.lib}/jps-model.jar</systemPath>
+        </dependency>
+
     </dependencies>
 
     <build>
