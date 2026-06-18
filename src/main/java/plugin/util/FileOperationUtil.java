@@ -18,8 +18,12 @@ public class FileOperationUtil {
             "<CREATE_FOLDER\\s+path=\"([^\"]+)\"\\s*/>");
     private static final Pattern DELETE_OP_PATTERN = Pattern.compile(
             "<DELETE_(FILE|FOLDER)\\s+path=\"([^\"]+)\"\\s*/>");
+    private static final Pattern RUN_TESTS_PATTERN = Pattern.compile(
+            "<RUN_TESTS\\s*/>");
 
-    public static void processFileOperations(Project project, String response) {
+    public static boolean processFileOperations(Project project, String response) {
+        boolean runTests = false;
+
         // Handle folder creation
         Matcher folderMatcher = FOLDER_OP_PATTERN.matcher(response);
         while (folderMatcher.find()) {
@@ -39,9 +43,17 @@ public class FileOperationUtil {
         while (fileMatcher.find()) {
             String type = fileMatcher.group(1);
             String path = fileMatcher.group(2).trim();
-            String content = fileMatcher.group(3).trim();
+            String content = fixPackageDeclaration(path, stripCodeFence(fileMatcher.group(3).trim()));
             writeFile(project, path, content);
         }
+
+        // Handle test run request
+        Matcher testMatcher = RUN_TESTS_PATTERN.matcher(response);
+        if (testMatcher.find()) {
+            runTests = true;
+        }
+
+        return runTests;
     }
 
     private static void createFolder(Project project, String relativePath) {
@@ -85,6 +97,47 @@ public class FileOperationUtil {
                 }
             });
         });
+    }
+
+    private static String fixPackageDeclaration(String filePath, String content) {
+        if (!filePath.endsWith(".java")) return content;
+
+        String normalized = filePath.replace("\\", "/");
+        String expectedPackage = null;
+        for (String root : new String[]{"src/main/java/", "src/test/java/"}) {
+            int idx = normalized.indexOf(root);
+            if (idx >= 0) {
+                String relative = normalized.substring(idx + root.length());
+                int lastSlash = relative.lastIndexOf('/');
+                expectedPackage = lastSlash > 0
+                        ? relative.substring(0, lastSlash).replace("/", ".")
+                        : "";
+                break;
+            }
+        }
+        if (expectedPackage == null || expectedPackage.isEmpty()) return content;
+
+        java.util.regex.Matcher m = Pattern.compile(
+                "^\\s*package\\s+([\\w.]+)\\s*;", java.util.regex.Pattern.MULTILINE)
+                .matcher(content);
+
+        String declaration = "package " + expectedPackage + ";";
+        if (m.find()) {
+            if (!m.group(1).equals(expectedPackage)) {
+                content = content.substring(0, m.start()) + declaration + content.substring(m.end());
+            }
+        } else {
+            content = declaration + "\n\n" + content;
+        }
+        return content;
+    }
+
+    private static String stripCodeFence(String content) {
+        // Remove opening fence: ```<optional-lang>\n
+        content = content.replaceFirst("^```[a-zA-Z0-9]*\\r?\\n", "");
+        // Remove closing fence: \n```
+        content = content.replaceFirst("\\r?\\n```\\s*$", "");
+        return content.trim();
     }
 
     private static void writeFile(Project project, String relativePath, String content) {

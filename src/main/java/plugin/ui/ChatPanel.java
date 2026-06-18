@@ -1,12 +1,14 @@
 package plugin.ui;
 
 import com.intellij.icons.AllIcons;
+import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.project.Project;
 import com.intellij.ui.content.Content;
 import org.jetbrains.annotations.NotNull;
 import plugin.llm.LocalLLMClient;
 import plugin.llm.model.ChatMessage;
 import plugin.settings.PluginSettings;
+import plugin.util.BuildUtil;
 import plugin.util.FileOperationUtil;
 import plugin.util.ProjectContextUtil;
 
@@ -22,7 +24,7 @@ import java.util.List;
 public class ChatPanel {
 
     private final Project project;
-    private final JPanel root;
+    final JPanel root;
 
     // Mode
     private String mode = "PLANNING";
@@ -33,6 +35,9 @@ public class ChatPanel {
     private Content tabContent;
     private boolean titleGenerated = false;
 
+    // Build auto-fix loop counter (reset per user message, max 2 fix attempts)
+    private int buildFixAttempts = 0;
+
     // Chat display
     private JTextPane      chatPane;
     private StyledDocument chatDoc;
@@ -40,7 +45,12 @@ public class ChatPanel {
     // Input
     private JTextArea    promptArea;
     private JButton      sendBtn;
+    private JButton      stopBtn;
     private JProgressBar spinner;
+
+    private volatile boolean isGenerating = false;
+    private volatile boolean stopRequested = false;
+    private Thread currentChatThread;
 
     // Streaming state (all accessed on EDT only)
     private final Timer         blinkTimer;
@@ -74,7 +84,7 @@ public class ChatPanel {
     // Toolbar — title on the left, gear on the right
     // -------------------------------------------------------------------------
 
-    private JPanel buildToolbar() {
+    JPanel buildToolbar() {
         JPanel bar = new JPanel(new BorderLayout());
         bar.setBorder(BorderFactory.createCompoundBorder(
                 BorderFactory.createMatteBorder(0, 0, 1, 0, UIManager.getColor("Separator.foreground")),
@@ -99,6 +109,7 @@ public class ChatPanel {
             chatPane.setStyledDocument(chatDoc);
             appendSystemMessage("Conversation history cleared.");
             titleGenerated = false;
+            buildFixAttempts = 0;
             titleLabel.setText("  New Chat");
             if (tabContent != null) tabContent.setDisplayName("New Chat");
         });
@@ -220,16 +231,17 @@ public class ChatPanel {
     // Chat area — styled JTextPane, always-on scroll bar
     // -------------------------------------------------------------------------
 
-    private JScrollPane buildChatArea() {
+    JScrollPane buildChatArea() {
         chatPane = new JTextPane();
         chatPane.setEditable(false);
         chatPane.setMargin(new Insets(10, 12, 10, 12));
+        chatPane.setBackground(UIManager.getColor("Editor.background"));
         chatDoc  = chatPane.getStyledDocument();
         initStyles();
 
         JScrollPane scroll = new JScrollPane(chatPane);
-        scroll.setVerticalScrollBarPolicy(ScrollPaneConstants.VERTICAL_SCROLLBAR_ALWAYS);
-        scroll.setHorizontalScrollBarPolicy(ScrollPaneConstants.HORIZONTAL_SCROLLBAR_NEVER);
+        scroll.setBorder(BorderFactory.createEmptyBorder());
+        scroll.getVerticalScrollBar().setUnitIncrement(16);
         return scroll;
     }
 
@@ -240,27 +252,27 @@ public class ChatPanel {
         userRoleStyle = chatPane.addStyle("userRole", base);
         StyleConstants.setForeground(userRoleStyle, new Color(0x4EC9B0));
         StyleConstants.setBold(userRoleStyle, true);
-        StyleConstants.setFontSize(userRoleStyle, 12);
+        StyleConstants.setFontSize(userRoleStyle, 13);
 
         userTextStyle = chatPane.addStyle("userText", base);
         StyleConstants.setForeground(userTextStyle, new Color(0xD4D4D4));
         StyleConstants.setFontFamily(userTextStyle, Font.SANS_SERIF);
-        StyleConstants.setFontSize(userTextStyle, 13);
+        StyleConstants.setFontSize(userTextStyle, 14);
 
         assistantRoleStyle = chatPane.addStyle("assistantRole", base);
         StyleConstants.setForeground(assistantRoleStyle, new Color(0x569CD6));
         StyleConstants.setBold(assistantRoleStyle, true);
-        StyleConstants.setFontSize(assistantRoleStyle, 12);
+        StyleConstants.setFontSize(assistantRoleStyle, 13);
 
         assistantTextStyle = chatPane.addStyle("assistantText", base);
         StyleConstants.setForeground(assistantTextStyle, new Color(0xE8E8E8));
-        StyleConstants.setFontFamily(assistantTextStyle, Font.MONOSPACED);
-        StyleConstants.setFontSize(assistantTextStyle, 13);
+        StyleConstants.setFontFamily(assistantTextStyle, Font.SANS_SERIF);
+        StyleConstants.setFontSize(assistantTextStyle, 14);
 
         systemStyle = chatPane.addStyle("system", base);
         StyleConstants.setForeground(systemStyle, new Color(0xCE9178));
         StyleConstants.setItalic(systemStyle, true);
-        StyleConstants.setFontSize(systemStyle, 11);
+        StyleConstants.setFontSize(systemStyle, 12);
 
         cursorStyle = chatPane.addStyle("cursor", base);
         StyleConstants.setForeground(cursorStyle, new Color(0x569CD6));
@@ -271,15 +283,15 @@ public class ChatPanel {
     // Input panel — 4-row textarea, Send bottom-right, Clear bottom-left
     // -------------------------------------------------------------------------
 
-    private JPanel buildInputPanel() {
-        JPanel panel = new JPanel(new BorderLayout(0, 6));
+    JPanel buildInputPanel() {
+        JPanel panel = new JPanel(new BorderLayout(0, 8));
         panel.setBorder(BorderFactory.createCompoundBorder(
-                BorderFactory.createMatteBorder(1, 0, 0, 0,
-                        UIManager.getColor("Separator.foreground")),
-                new EmptyBorder(8, 10, 10, 10)));
+                BorderFactory.createMatteBorder(1, 0, 0, 0, UIManager.getColor("Separator.foreground")),
+                BorderFactory.createEmptyBorder(8, 12, 12, 12)
+        ));
 
         promptArea = new JTextArea(4, 0);
-        promptArea.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 13));
+        promptArea.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 14));
         promptArea.setLineWrap(true);
         promptArea.setWrapStyleWord(true);
         promptArea.setMargin(new Insets(6, 8, 6, 8));
@@ -287,9 +299,14 @@ public class ChatPanel {
         promptArea.addKeyListener(new KeyAdapter() {
             @Override
             public void keyPressed(KeyEvent e) {
-                if (e.getKeyCode() == KeyEvent.VK_ENTER && !e.isShiftDown()) {
-                    e.consume();
-                    sendMessage();
+                if (e.getKeyCode() == KeyEvent.VK_ENTER) {
+                    if (e.isShiftDown()) {
+                        promptArea.insert("\n", promptArea.getCaretPosition());
+                        e.consume();
+                    } else {
+                        e.consume();
+                        sendMessage();
+                    }
                 }
             }
         });
@@ -301,6 +318,15 @@ public class ChatPanel {
         sendBtn = new JButton("Send");
         sendBtn.setPreferredSize(new Dimension(80, 28));
         sendBtn.addActionListener(e -> sendMessage());
+
+        stopBtn = new JButton("Stop", AllIcons.Actions.Suspend);
+        stopBtn.setPreferredSize(new Dimension(80, 28));
+        stopBtn.setVisible(false);
+        stopBtn.addActionListener(e -> {
+            stopRequested = true;
+            appendSystemMessage("Interrupted by user.");
+            setLoading(false);
+        });
 
         JButton clearBtn = new JButton("Clear");
         clearBtn.addActionListener(e -> {
@@ -318,7 +344,10 @@ public class ChatPanel {
         leftCtrl.add(clearBtn);
         leftCtrl.add(spinner);
         ctrlRow.add(leftCtrl, BorderLayout.WEST);
-        ctrlRow.add(sendBtn,  BorderLayout.EAST);
+        JPanel rightCtrl = new JPanel(new FlowLayout(FlowLayout.RIGHT, 4, 0));
+        rightCtrl.add(stopBtn);
+        rightCtrl.add(sendBtn);
+        ctrlRow.add(rightCtrl, BorderLayout.EAST);
 
         panel.add(promptScroll, BorderLayout.CENTER);
         panel.add(ctrlRow,      BorderLayout.SOUTH);
@@ -332,6 +361,7 @@ public class ChatPanel {
     private void sendMessage() {
         String text = promptArea.getText().trim();
         if (text.isEmpty()) return;
+        buildFixAttempts = 0;
 
         PluginSettings s  = PluginSettings.getInstance();
         String model      = s.getModel();
@@ -361,11 +391,13 @@ public class ChatPanel {
                     "<CREATE_FOLDER path=\"path/to/folder\" />\n" +
                     "<DELETE_FILE path=\"path/to/file\" />\n" +
                     "<DELETE_FOLDER path=\"path/to/folder\" />\n" +
+                    "<RUN_TESTS />\n" +
                     "Rules:\n" +
                     "1. Output the raw XML tag directly — never wrap it in ``` fences.\n" +
                     "2. Always include the COMPLETE file content inside the tag — never truncate or summarize.\n" +
                     "3. You may add a brief explanation AFTER the closing XML tag.\n" +
                     "4. If you use a ``` code block for file content, the file will NOT be changed.\n" +
+                    "5. To run all project tests, use the <RUN_TESTS /> tag. This can be combined with file changes.\n" +
                     "Execute tasks one by one and inform the user of your progress.\n" +
                     "When in BYPASS mode, ignore file operations and behave like a general assistant.\n" +
                     "Maintain the session context until the user says to discard it.\n" +
@@ -434,10 +466,13 @@ public class ChatPanel {
         }
 
         List<ChatMessage> finalSnapshot = snapshot;
-        daemon(() -> {
+        currentChatThread = new Thread(() -> {
             try {
                 new LocalLLMClient(endpoint).streamChat(model, finalSnapshot,
-                        token -> SwingUtilities.invokeLater(() -> appendToken(token)));
+                        token -> {
+                            if (stopRequested) throw new RuntimeException("INTERRUPTED");
+                            SwingUtilities.invokeLater(() -> appendToken(token));
+                        });
                 SwingUtilities.invokeLater(() -> {
                     finalizeAssistantMessage();
                     String fullResponse = assistantBuffer.toString();
@@ -453,19 +488,34 @@ public class ChatPanel {
                                          fullResponse.contains("<MODIFY_FILE") ||
                                          fullResponse.contains("<CREATE_FOLDER") ||
                                          fullResponse.contains("<DELETE_FILE") ||
-                                         fullResponse.contains("<DELETE_FOLDER");
+                                         fullResponse.contains("<DELETE_FOLDER") ||
+                                         fullResponse.contains("<RUN_TESTS");
                         if (hasOps) {
-                            FileOperationUtil.processFileOperations(project, fullResponse);
-                            appendSystemMessage("File operations applied.");
-                        } else if (canRetry && fullResponse.contains("```") && isFileOpIntent(userText)) {
-                            // Model used a code block — auto-correct once
-                            appendSystemMessage("⚠ Model used a code block instead of XML tags — auto-correcting…");
+                            boolean runTests = FileOperationUtil.processFileOperations(project, fullResponse);
+                            if (runTests) {
+                                appendSystemMessage("Test execution requested. Running tests…");
+                                scheduleTestRun();
+                            } else {
+                                appendSystemMessage("File operations applied. Running build check…");
+                                scheduleBuildCheck(model, endpoint);
+                            }
+                            return;
+                        } else if (canRetry && isFileOpIntent(userText)) {
+                            // Model either used a code block or gave plain text — auto-correct once
+                            boolean usedCodeBlock = fullResponse.contains("```");
+                            String correction = usedCodeBlock
+                                ? "CORRECTION REQUIRED: You responded with file content inside a ``` code block. " +
+                                  "A code block is display-only — it does NOT write to disk. "
+                                : "CORRECTION REQUIRED: You described what to do instead of actually doing it. " +
+                                  "A text description does NOT write to disk. ";
+                            appendSystemMessage("⚠ Model did not use XML tags — auto-correcting…");
                             history.add(new ChatMessage("user",
-                                    "CORRECTION REQUIRED: You responded with file content inside a ``` code block. " +
-                                    "A code block is display-only — it does NOT write to disk. " +
-                                    "You MUST re-send your response using only the XML tag:\n" +
+                                    correction +
+                                    "You MUST re-send your response using the XML tag format:\n" +
                                     "<MODIFY_FILE path=\"path/to/file\">complete new file content</MODIFY_FILE>\n" +
-                                    "Output the raw XML tag directly — no ``` fences around it."));
+                                    "<CREATE_FILE path=\"path/to/file\">complete file content</CREATE_FILE>\n" +
+                                    "<RUN_TESTS />\n" +
+                                    "Output the raw XML tag directly with the full file content inside it."));
                             beginAssistantMessage();
                             blinkTimer.start();
                             streamAndHandle(model, endpoint, null, false);
@@ -475,8 +525,8 @@ public class ChatPanel {
                                     "Make sure you are in EDITING mode and the model uses <MODIFY_FILE> tags.");
                         }
                     } else if ("PLANNING".equals(mode)) {
-                        if (fullResponse.contains("<CREATE_FILE") || fullResponse.contains("<MODIFY_FILE") || fullResponse.contains("<CREATE_FOLDER")) {
-                            appendSystemMessage("File operations detected but skipped — switch to EDITING mode to allow file changes.");
+                        if (fullResponse.contains("<CREATE_FILE") || fullResponse.contains("<MODIFY_FILE") || fullResponse.contains("<CREATE_FOLDER") || fullResponse.contains("<RUN_TESTS")) {
+                            appendSystemMessage("Operation detected but skipped — switch to EDITING mode to allow changes or test execution.");
                         }
                     }
 
@@ -485,11 +535,17 @@ public class ChatPanel {
             } catch (Exception ex) {
                 SwingUtilities.invokeLater(() -> {
                     finalizeAssistantMessage();
-                    appendSystemMessage("Error: " + ex.getMessage());
+                    if (!"INTERRUPTED".equals(ex.getMessage())) {
+                        appendSystemMessage("Error: " + ex.getMessage());
+                    } else {
+                        history.add(new ChatMessage("assistant", assistantBuffer.toString() + " [Interrupted]"));
+                    }
                     setLoading(false);
                 });
             }
         });
+        currentChatThread.setDaemon(true);
+        currentChatThread.start();
     }
 
     // -------------------------------------------------------------------------
@@ -567,6 +623,55 @@ public class ChatPanel {
     // Utilities
     // -------------------------------------------------------------------------
 
+    private void scheduleBuildCheck(String model, String endpoint) {
+        // Runs after all VFS write actions have been dispatched to the EDT queue
+        ApplicationManager.getApplication().invokeLater(() ->
+            daemon(() -> {
+                BuildUtil.BuildResult result = BuildUtil.runMavenCompile(project);
+                SwingUtilities.invokeLater(() -> {
+                    if (result.success()) {
+                        appendSystemMessage("✓ Build successful.");
+                        setLoading(false);
+                    } else if (buildFixAttempts < 2) {
+                        buildFixAttempts++;
+                        String errors = result.output();
+                        if (errors.length() > 3000) errors = errors.substring(0, 3000) + "\n[...truncated]";
+                        appendSystemMessage("⚠ Build errors — asking LLM to fix (attempt " + buildFixAttempts + "/2)…");
+                        history.add(new ChatMessage("user",
+                                "The code you just wrote has compile errors. Fix ALL errors now.\n" +
+                                "If a Maven dependency is missing, add it to pom.xml.\n" +
+                                "Use <MODIFY_FILE> or <CREATE_FILE> XML tags for every file you change.\n\n" +
+                                "Compiler output:\n" + errors));
+                        beginAssistantMessage();
+                        blinkTimer.start();
+                        streamAndHandle(model, endpoint, null, false);
+                    } else {
+                        String errors = result.output();
+                        appendSystemMessage("⚠ Build still failing after 2 fix attempts — manual intervention needed.\n" +
+                                errors.substring(0, Math.min(1000, errors.length())));
+                        setLoading(false);
+                    }
+                });
+            })
+        );
+    }
+
+    private void scheduleTestRun() {
+        ApplicationManager.getApplication().invokeLater(() ->
+            daemon(() -> {
+                BuildUtil.BuildResult result = BuildUtil.runMavenTest(project);
+                SwingUtilities.invokeLater(() -> {
+                    if (result.success()) {
+                        appendSystemMessage("✓ Tests passed successfully.\n" + result.output());
+                    } else {
+                        appendSystemMessage("❌ Tests failed.\n" + result.output());
+                    }
+                    setLoading(false);
+                });
+            })
+        );
+    }
+
     private static boolean isFileOpIntent(String userText) {
         if (userText == null) return false;
         String lower = userText.toLowerCase();
@@ -574,6 +679,7 @@ public class ChatPanel {
                lower.contains("create") || lower.contains("delete") || lower.contains("change") ||
                lower.contains("write") || lower.contains("fix") || lower.contains("remove") ||
                lower.contains("rename") || lower.contains("replace") || lower.contains("refactor") ||
+               lower.contains("run test") || lower.contains("execute test") || lower.contains("check test") ||
                lower.contains("implement") || lower.contains("add") && (lower.contains("file") || lower.contains("class") || lower.contains("method"));
     }
 
@@ -608,9 +714,15 @@ public class ChatPanel {
     }
 
     private void setLoading(boolean loading) {
+        isGenerating = loading;
+        if (!loading) stopRequested = false;
+
         sendBtn.setEnabled(!loading);
+        stopBtn.setVisible(loading);
         spinner.setIndeterminate(loading);
         spinner.setVisible(loading);
+        promptArea.setEnabled(!loading);
+        if (!loading) promptArea.requestFocusInWindow();
     }
 
     private static void daemon(Runnable r) {
