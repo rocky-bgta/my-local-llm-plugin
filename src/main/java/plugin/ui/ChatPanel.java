@@ -52,11 +52,13 @@ public class ChatPanel {
     // Input
     private JTextArea    promptArea;
     private JButton      sendBtn;
+    private JButton      stopBtn;
     private JProgressBar spinner;
 
     // Streaming state (all accessed on EDT only)
-    private final Timer         blinkTimer;
-    private       boolean       streaming       = false;
+    private final Timer           blinkTimer;
+    private       boolean         streaming       = false;
+    private volatile Thread       streamThread    = null; // daemon thread running current stream
     private       boolean       cursorOn        = false;
     private final StringBuilder assistantBuffer = new StringBuilder();
 
@@ -355,9 +357,32 @@ public class ChatPanel {
         promptScroll.setHorizontalScrollBarPolicy(ScrollPaneConstants.HORIZONTAL_SCROLLBAR_NEVER);
 
         // ── Buttons ───────────────────────────────────────────────────────────
-        sendBtn = new JButton("Send");
-        sendBtn.setPreferredSize(new Dimension(80, 28));
+        // ── Send button — arrow icon, blue accent ─────────────────────────────
+        sendBtn = new JButton("▶");
+        sendBtn.setFont(sendBtn.getFont().deriveFont(Font.BOLD, 15f));
+        sendBtn.setPreferredSize(new Dimension(46, 32));
+        sendBtn.setToolTipText("Send (Enter)");
+        sendBtn.setFocusPainted(false);
+        sendBtn.setBackground(new Color(0x3574F0));
+        sendBtn.setForeground(Color.WHITE);
+        sendBtn.setOpaque(true);
+        sendBtn.setBorderPainted(false);
+        sendBtn.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
         sendBtn.addActionListener(e -> sendMessage());
+
+        // ── Stop button — visible only while streaming ─────────────────────────
+        stopBtn = new JButton(AllIcons.Actions.Suspend);
+        stopBtn.setToolTipText("Stop generation");
+        stopBtn.setPreferredSize(new Dimension(32, 32));
+        stopBtn.setBorderPainted(false);
+        stopBtn.setContentAreaFilled(false);
+        stopBtn.setFocusPainted(false);
+        stopBtn.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
+        stopBtn.setVisible(false);
+        stopBtn.addActionListener(e -> {
+            Thread t = streamThread;
+            if (t != null) t.interrupt();
+        });
 
         JButton clearBtn = new JButton("Clear");
         clearBtn.addActionListener(e -> {
@@ -384,8 +409,11 @@ public class ChatPanel {
         leftCtrl.add(clearBtn);
         leftCtrl.add(attachBtn);
         leftCtrl.add(spinner);
-        ctrlRow.add(leftCtrl, BorderLayout.WEST);
-        ctrlRow.add(sendBtn,  BorderLayout.EAST);
+        JPanel rightCtrl = new JPanel(new FlowLayout(FlowLayout.RIGHT, 4, 0));
+        rightCtrl.add(stopBtn);
+        rightCtrl.add(sendBtn);
+        ctrlRow.add(leftCtrl,  BorderLayout.WEST);
+        ctrlRow.add(rightCtrl, BorderLayout.EAST);
 
         panel.add(imagePreviewPanel, BorderLayout.NORTH);
         panel.add(promptScroll,      BorderLayout.CENTER);
@@ -437,24 +465,26 @@ public class ChatPanel {
 
         final String capturedText = text; // effectively final for lambda capture
         daemon(() -> {
-            // Phase 2 (daemon): run git commands (blocking I/O, safe off EDT).
-            String gitSection = new GitContextBuilder(project).buildGitSection(capturedText);
-
-            // Build the full enriched prompt entirely off the EDT.
-            String enriched = ProjectContextBuilder.buildPrompt(
-                    capturedText, mode, priorHistory, ideSnapshot, gitSection);
-            // Preserve images from the original user message in the enriched entry.
-            ChatMessage original = snapshot.get(snapshot.size() - 1);
-            snapshot.set(snapshot.size() - 1, new ChatMessage("user", enriched, original.images()));
-
-            Consumer<String> onToken = token -> SwingUtilities.invokeLater(() -> appendToken(token));
-
+            streamThread = Thread.currentThread();
             try {
+                // Phase 2 (daemon): run git commands (blocking I/O, safe off EDT).
+                String gitSection = new GitContextBuilder(project).buildGitSection(capturedText);
+
+                // Build the full enriched prompt entirely off the EDT.
+                String enriched = ProjectContextBuilder.buildPrompt(
+                        capturedText, mode, priorHistory, ideSnapshot, gitSection);
+                // Preserve images from the original user message in the enriched entry.
+                ChatMessage original = snapshot.get(snapshot.size() - 1);
+                snapshot.set(snapshot.size() - 1, new ChatMessage("user", enriched, original.images()));
+
+                Consumer<String> onToken = token -> SwingUtilities.invokeLater(() -> appendToken(token));
+
                 if (enriched.length() > MAX_SINGLE_PROMPT) {
                     sendChunked(endpoint, model, snapshot, enriched, original.images(), onToken);
                 } else {
                     new LMStudioClient(endpoint).streamChat(model, snapshot, onToken);
                 }
+
                 SwingUtilities.invokeLater(() -> {
                     finalizeAssistantMessage();
                     history.add(new ChatMessage("assistant", assistantBuffer.toString()));
@@ -462,11 +492,16 @@ public class ChatPanel {
                     maybeGenerateTitle(capturedText, endpoint, model);
                 });
             } catch (Exception ex) {
+                boolean wasStopped = Thread.currentThread().isInterrupted()
+                        || ex.getCause() instanceof InterruptedException
+                        || ex instanceof java.io.InterruptedIOException;
                 SwingUtilities.invokeLater(() -> {
                     finalizeAssistantMessage();
-                    appendSystemMessage("Error: " + ex.getMessage());
+                    if (!wasStopped) appendSystemMessage("Error: " + ex.getMessage());
                     setLoading(false);
                 });
+            } finally {
+                streamThread = null;
             }
         });
     }
@@ -552,6 +587,7 @@ public class ChatPanel {
 
     private void setLoading(boolean loading) {
         sendBtn.setEnabled(!loading);
+        stopBtn.setVisible(loading);
         spinner.setIndeterminate(loading);
         spinner.setVisible(loading);
     }
