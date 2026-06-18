@@ -51,6 +51,12 @@ public class ChatPanel {
     private Style systemStyle;
     private Style cursorStyle;
 
+    // Font families — same stack used by Claude / ChatGPT / GitHub Copilot on Windows
+    private static final String UI_FONT   = availableFont(
+            "Segoe UI", "Inter", "SF Pro Text", "Helvetica Neue", "Arial", Font.SANS_SERIF);
+    private static final String CODE_FONT = availableFont(
+            "JetBrains Mono", "Cascadia Code", "Cascadia Mono", "Consolas", "Courier New", Font.MONOSPACED);
+
     public ChatPanel(@NotNull Project project) {
         this.project = project;
         blinkTimer = new Timer(500, e -> toggleBlink());
@@ -73,7 +79,7 @@ public class ChatPanel {
         bar.setPreferredSize(new Dimension(0, 32));
 
         JLabel title = new JLabel("  Local LLM");
-        title.setFont(title.getFont().deriveFont(Font.BOLD, 13f));
+        title.setFont(new Font(UI_FONT, Font.BOLD, 14));
         bar.add(title, BorderLayout.WEST);
 
         JButton gearBtn = new JButton(AllIcons.General.Settings);
@@ -212,34 +218,44 @@ public class ChatPanel {
         Style base = StyleContext.getDefaultStyleContext()
                                  .getStyle(StyleContext.DEFAULT_STYLE);
 
+        final int ROLE_SIZE = 13;  // "You" / "Assistant" labels
+        final int TEXT_SIZE = 15;  // message body
+        final int SYS_SIZE  = 13;  // system / error notices
+
         userRoleStyle = chatPane.addStyle("userRole", base);
         StyleConstants.setForeground(userRoleStyle, new Color(0x4EC9B0));
         StyleConstants.setBold(userRoleStyle, true);
-        StyleConstants.setFontSize(userRoleStyle, 12);
+        StyleConstants.setFontFamily(userRoleStyle, UI_FONT);
+        StyleConstants.setFontSize(userRoleStyle, ROLE_SIZE);
 
         userTextStyle = chatPane.addStyle("userText", base);
         StyleConstants.setForeground(userTextStyle, new Color(0xD4D4D4));
-        StyleConstants.setFontFamily(userTextStyle, Font.SANS_SERIF);
-        StyleConstants.setFontSize(userTextStyle, 13);
+        StyleConstants.setFontFamily(userTextStyle, UI_FONT);
+        StyleConstants.setFontSize(userTextStyle, TEXT_SIZE);
 
         assistantRoleStyle = chatPane.addStyle("assistantRole", base);
         StyleConstants.setForeground(assistantRoleStyle, new Color(0x569CD6));
         StyleConstants.setBold(assistantRoleStyle, true);
-        StyleConstants.setFontSize(assistantRoleStyle, 12);
+        StyleConstants.setFontFamily(assistantRoleStyle, UI_FONT);
+        StyleConstants.setFontSize(assistantRoleStyle, ROLE_SIZE);
 
+        // Assistant body: UI_FONT for prose, CODE_FONT for code snippets (future)
         assistantTextStyle = chatPane.addStyle("assistantText", base);
         StyleConstants.setForeground(assistantTextStyle, new Color(0xE8E8E8));
-        StyleConstants.setFontFamily(assistantTextStyle, Font.MONOSPACED);
-        StyleConstants.setFontSize(assistantTextStyle, 13);
+        StyleConstants.setFontFamily(assistantTextStyle, UI_FONT);
+        StyleConstants.setFontSize(assistantTextStyle, TEXT_SIZE);
 
         systemStyle = chatPane.addStyle("system", base);
         StyleConstants.setForeground(systemStyle, new Color(0xCE9178));
         StyleConstants.setItalic(systemStyle, true);
-        StyleConstants.setFontSize(systemStyle, 11);
+        StyleConstants.setFontFamily(systemStyle, UI_FONT);
+        StyleConstants.setFontSize(systemStyle, SYS_SIZE);
 
         cursorStyle = chatPane.addStyle("cursor", base);
         StyleConstants.setForeground(cursorStyle, new Color(0x569CD6));
         StyleConstants.setBold(cursorStyle, true);
+        StyleConstants.setFontFamily(cursorStyle, UI_FONT);
+        StyleConstants.setFontSize(cursorStyle, TEXT_SIZE);
     }
 
     // -------------------------------------------------------------------------
@@ -254,7 +270,7 @@ public class ChatPanel {
                 new EmptyBorder(8, 10, 10, 10)));
 
         promptArea = new JTextArea(4, 0);
-        promptArea.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 13));
+        promptArea.setFont(new Font(UI_FONT, Font.PLAIN, 15));
         promptArea.setLineWrap(true);
         promptArea.setWrapStyleWord(true);
         promptArea.setMargin(new Insets(6, 8, 6, 8));
@@ -445,5 +461,15 @@ public class ChatPanel {
 
     public JPanel getSwingComponent() {
         return root;
+    }
+
+    // Returns the first font family name that is actually installed on this system.
+    private static String availableFont(String... candidates) {
+        java.util.Set<String> installed = new java.util.HashSet<>(java.util.Arrays.asList(
+                GraphicsEnvironment.getLocalGraphicsEnvironment().getAvailableFontFamilyNames()));
+        for (String f : candidates) {
+            if (installed.contains(f)) return f;
+        }
+        return Font.SANS_SERIF;
     }
 }
