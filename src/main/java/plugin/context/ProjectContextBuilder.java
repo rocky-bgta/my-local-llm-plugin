@@ -13,9 +13,15 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Builds the full autonomous-agent system prompt sent to the LLM on every turn.
- * The UI always shows the clean user text; the enriched version is used only in
- * the LLM request snapshot.
+ * Two-phase context builder:
+ *
+ *   Phase 1 – {@link #collectSnapshot()} – must run on the EDT.
+ *     Reads IntelliJ APIs (FileEditorManager, Editor, VFS) into a plain
+ *     {@link IdeSnapshot} value object.
+ *
+ *   Phase 2 – {@link #buildPrompt} – thread-safe static method.
+ *     Combines the snapshot with a pre-built git section and session history
+ *     into the final system prompt sent to the LLM.
  */
 public class ProjectContextBuilder {
 
@@ -29,110 +35,112 @@ public class ProjectContextBuilder {
         this.project = project;
     }
 
-    // -------------------------------------------------------------------------
-    // Public API
-    // -------------------------------------------------------------------------
+    // =========================================================================
+    // Phase 1 — EDT only
+    // =========================================================================
+
+    /** Collect all IntelliJ-API-dependent data. Must be called on the EDT. */
+    public IdeSnapshot collectSnapshot() {
+        String currentPath = getCurrentFilePath();
+        return new IdeSnapshot(
+                project.getName(),
+                detectLanguage(),
+                detectFramework(),
+                buildProjectTree(),
+                currentPath,
+                getCurrentFileContent(),
+                getSelectedText(),
+                buildOpenFilesSection(currentPath),
+                getBuildFilesContent()
+        );
+    }
+
+    // =========================================================================
+    // Phase 2 — thread-safe, no IntelliJ APIs
+    // =========================================================================
 
     /**
-     * @param userMessage   the raw text the user typed
-     * @param mode          "Planning", "Editing", or "Bypass"
-     * @param priorHistory  conversation turns that happened before this message
+     * Builds the complete enriched prompt from pre-collected data.
+     * Safe to call from any thread.
      */
-    public String buildEnrichedPrompt(@NotNull String userMessage,
-                                      @NotNull String mode,
-                                      @NotNull List<ChatMessage> priorHistory) {
-
-        String tree           = buildProjectTree();
-        String currentPath    = getCurrentFilePath();
-        String currentContent = getCurrentFileContent();
-        String selectedCode   = getSelectedText();
-        String openFiles      = buildOpenFilesSection(currentPath);
-        String buildFiles     = getBuildFilesContent();
-        String sessionHistory = formatHistory(priorHistory);
+    public static String buildPrompt(
+            @NotNull String userMessage,
+            @NotNull String mode,
+            @NotNull List<ChatMessage> priorHistory,
+            @NotNull IdeSnapshot ide,
+            @NotNull String gitSection) {
 
         StringBuilder sb = new StringBuilder();
 
-        // ── System identity ──────────────────────────────────────────────────
+        // ── Identity ─────────────────────────────────────────────────────────
         sb.append("# Local LLM Assistant — System Prompt\n\n");
         sb.append("You are an autonomous AI software engineering agent running inside IntelliJ IDEA.\n\n");
         sb.append("You have access to the user's project, source files, project structure, ")
-          .append("open files, selected code, and conversation history.\n\n");
-        sb.append("Your goal is to help the user complete software engineering tasks with ")
-          .append("minimal interruption while maintaining correctness and project consistency.\n\n");
+          .append("open files, selected code, git history, and conversation history.\n\n");
         sb.append("---\n\n");
 
         // ── Active mode ───────────────────────────────────────────────────────
         sb.append("# Active Mode: **").append(mode).append("**\n\n");
         switch (mode) {
             case "Planning" -> sb.append("""
-                    Purpose: Analyse requirements, explore architecture, create implementation plans,
-                    suggest approaches. Do NOT modify files. Break large tasks into smaller tasks,
-                    identify dependencies, explain reasoning, and produce an implementation roadmap.
+                    Purpose: Analyse requirements, explore architecture, create implementation plans.
+                    Do NOT modify files. Break tasks down, identify dependencies, produce a roadmap.
                     """);
             case "Bypass" -> sb.append("""
                     Purpose: Fast execution. Make reasonable assumptions, minimise explanations,
                     focus on implementation, generate changes rapidly.
                     """);
             default -> sb.append("""
-                    Purpose: Perform implementation work. Modify files, create files, create folders,
-                    refactor code, update configurations, generate tests.
-                    Do NOT repeatedly ask for confirmation. Continue performing all required
-                    modifications until the requested task is complete.
-                    Only stop if critical information is missing, multiple valid implementation
-                    choices exist, or user intervention is absolutely required.
+                    Purpose: Full implementation. Modify files, create files, refactor, configure,
+                    generate tests. Do NOT ask for repeated confirmation. Continue until done.
+                    Only stop if critical information is missing or multiple valid choices exist.
                     """);
         }
         sb.append("\n---\n\n");
 
-        // ── Persistent session rules ──────────────────────────────────────────
+        // ── Standing rules ────────────────────────────────────────────────────
         sb.append("""
                 # Persistent Session Context
 
-                Maintain session context across the entire conversation.
-                Treat all messages as part of the same task unless the user says:
-                "Start a new conversation", "New task", "Reset context",
-                "Discard previous context", or "Forget current task".
-
-                Until then:
-                - Remember previous requirements and architectural decisions.
-                - Remember created and modified files.
-                - Continue unfinished work.
-                - Avoid asking the user to repeat information already provided.
+                Maintain context across the entire conversation.
+                Remember requirements, architectural decisions, created/modified files.
+                Continue unfinished work. Never ask the user to repeat information.
+                Reset only on: "New task" | "Reset context" | "Start a new conversation".
 
                 ---
 
                 # Task Execution Rules
 
                 1. Analyse the entire requirement.
-                2. Identify all sub-tasks.
-                3. Determine affected and new files.
-                4. Execute tasks sequentially.
-                5. Track progress internally.
-                6. Continue until ALL tasks are completed.
+                2. Identify all sub-tasks and affected files.
+                3. Execute sequentially — never stop after one sub-task.
+                4. Report progress during long operations.
+                5. Continue until ALL tasks are completed.
 
-                Never stop after completing only the first sub-task.
+                ---
+
+                # Git Integration Rules
+
+                - Use git history as first-class context when debugging regressions.
+                - If the user references a commit hash, restrict analysis to that commit.
+                - Review findings grouped by: Critical | Major | Minor | Suggestion.
+                - When reviewing a PR/MR report: { ready_for_approval, remaining_issues, review_summary }
 
                 ---
 
                 # Code Generation Rules
 
-                Generated code must:
-                - Follow project conventions and preserve existing architecture.
-                - Compile successfully.
-                - Avoid unnecessary refactoring or unrelated changes.
-                - Include all required imports.
-                - Include tests when appropriate.
+                Follow project conventions. Compile-clean. Minimal unrelated changes.
+                Include all imports. Add or update tests when appropriate.
 
                 ---
 
                 # Response Format
 
-                For each cycle return a JSON block followed by implementation details:
-
                 ```json
                 {
                   "mode": "planning|editing|bypass",
-                  "current_step": "Current activity",
+                  "current_step": "…",
                   "completed_steps": [],
                   "remaining_steps": [],
                   "files_modified": [],
@@ -147,34 +155,44 @@ public class ProjectContextBuilder {
 
         // ── Project context ───────────────────────────────────────────────────
         sb.append("# Project Context\n\n");
+        sb.append("**Project:** `").append(ide.projectName()).append("`  ")
+          .append("**Language:** ").append(ide.language()).append("  ")
+          .append("**Framework:** ").append(ide.framework()).append("\n\n");
 
-        sb.append("## Project Tree\n\n```\n").append(tree).append("```\n\n");
+        sb.append("## Project Tree\n\n```\n").append(ide.projectTree()).append("```\n\n");
 
-        sb.append("## Current File\n\n");
-        sb.append("Path: `").append(currentPath).append("`\n\n");
-        if (!currentContent.isBlank()) {
-            String ext = ext(currentPath);
-            sb.append("```").append(ext).append("\n")
-              .append(truncate(currentContent, MAX_FILE_CHARS))
+        sb.append("## Current File\n\nPath: `").append(ide.currentFilePath()).append("`\n\n");
+        if (!ide.currentFileContent().isBlank()) {
+            sb.append("```").append(ext(ide.currentFilePath())).append("\n")
+              .append(truncate(ide.currentFileContent(), MAX_FILE_CHARS))
               .append("\n```\n\n");
         }
 
-        if (!selectedCode.isBlank()) {
-            sb.append("## Selected Code\n\n```").append(ext(currentPath)).append("\n")
-              .append(selectedCode).append("\n```\n\n");
+        String sel = ide.selectedText();
+        sb.append("## Selected Code\n\n");
+        if (sel.isBlank()) {
+            sb.append("_(none)_\n\n");
         } else {
-            sb.append("## Selected Code\n\n_(none)_\n\n");
+            sb.append("```").append(ext(ide.currentFilePath())).append("\n")
+              .append(sel).append("\n```\n\n");
         }
 
-        sb.append("## Open Files\n\n").append(openFiles.isBlank() ? "_(none)_\n" : openFiles).append("\n");
+        String open = ide.openFilesSection();
+        sb.append("## Open Files\n\n").append(open.isBlank() ? "_(none)_\n" : open).append("\n");
 
-        sb.append("## Build Files\n\n").append(buildFiles.isBlank() ? "_(none found)_\n" : buildFiles).append("\n");
+        String build = ide.buildFilesContent();
+        sb.append("## Build Files\n\n").append(build.isBlank() ? "_(none found)_\n" : build).append("\n");
 
+        // ── Git context (populated by GitContextBuilder on daemon thread) ─────
+        if (!gitSection.isBlank()) {
+            sb.append(gitSection).append("\n");
+        }
+
+        // ── Session history ───────────────────────────────────────────────────
+        String hist = formatHistory(priorHistory);
         sb.append("## Conversation History\n\n")
-          .append(sessionHistory.isBlank() ? "_(new session — no prior turns)_\n" : sessionHistory)
-          .append("\n");
-
-        sb.append("---\n\n");
+          .append(hist.isBlank() ? "_(new session — no prior turns)_\n" : hist)
+          .append("\n---\n\n");
 
         // ── User request ──────────────────────────────────────────────────────
         sb.append("## User Request\n\n").append(userMessage);
@@ -182,9 +200,9 @@ public class ProjectContextBuilder {
         return sb.toString();
     }
 
-    // -------------------------------------------------------------------------
-    // IDE data collectors
-    // -------------------------------------------------------------------------
+    // =========================================================================
+    // IDE data collectors — EDT only
+    // =========================================================================
 
     private String getCurrentFilePath() {
         VirtualFile[] sel = FileEditorManager.getInstance(project).getSelectedFiles();
@@ -222,32 +240,27 @@ public class ProjectContextBuilder {
     }
 
     private String getBuildFilesContent() {
-        String[] buildFileNames = {"pom.xml", "build.gradle", "build.gradle.kts",
-                                   "settings.gradle", "package.json", "go.mod", "Cargo.toml"};
+        String[] names = {"pom.xml", "build.gradle", "build.gradle.kts",
+                          "settings.gradle", "package.json", "go.mod", "Cargo.toml"};
         StringBuilder sb = new StringBuilder();
         for (VirtualFile root : ProjectRootManager.getInstance(project).getContentRoots()) {
-            for (String name : buildFileNames) {
+            for (String name : names) {
                 VirtualFile f = root.findChild(name);
                 if (f == null) continue;
                 String content = readFile(f);
                 if (content.isBlank()) continue;
-                sb.append("### ").append(name).append("\n\n")
-                  .append("```xml\n")
-                  .append(truncate(content, 3_000))
-                  .append("\n```\n\n");
+                sb.append("### ").append(name).append("\n\n```xml\n")
+                  .append(truncate(content, 3_000)).append("\n```\n\n");
             }
         }
         return sb.toString();
     }
 
-    // -------------------------------------------------------------------------
-    // Project tree
-    // -------------------------------------------------------------------------
-
     private String buildProjectTree() {
-        VirtualFile[] roots = ProjectRootManager.getInstance(project).getContentRoots();
         StringBuilder sb = new StringBuilder();
-        for (VirtualFile root : roots) appendTree(sb, root, 0);
+        for (VirtualFile root : ProjectRootManager.getInstance(project).getContentRoots()) {
+            appendTree(sb, root, 0);
+        }
         return sb.toString();
     }
 
@@ -256,7 +269,6 @@ public class ProjectContextBuilder {
         String name = node.getName();
         if (name.startsWith(".") || name.equals("target") || name.equals("build")
                 || name.equals("out") || name.equals("node_modules")) return;
-
         String indent = "  ".repeat(depth);
         if (node.isDirectory()) {
             sb.append(indent).append(name).append("/\n");
@@ -266,10 +278,6 @@ public class ProjectContextBuilder {
             sb.append(indent).append(name).append("\n");
         }
     }
-
-    // -------------------------------------------------------------------------
-    // Language / framework detection
-    // -------------------------------------------------------------------------
 
     private String detectLanguage() {
         for (VirtualFile r : ProjectRootManager.getInstance(project).getContentRoots()) {
@@ -282,25 +290,30 @@ public class ProjectContextBuilder {
         return "Unknown";
     }
 
-    // -------------------------------------------------------------------------
-    // Session history formatter
-    // -------------------------------------------------------------------------
+    private String detectFramework() {
+        for (VirtualFile r : ProjectRootManager.getInstance(project).getContentRoots()) {
+            if (exists(r, "pom.xml"))          return "Maven";
+            if (exists(r, "build.gradle.kts")) return "Gradle (Kotlin DSL)";
+            if (exists(r, "build.gradle"))     return "Gradle";
+            if (exists(r, "go.mod"))           return "Go Modules";
+            if (exists(r, "package.json"))     return "Node.js";
+        }
+        return "Unknown";
+    }
+
+    // =========================================================================
+    // Static helpers (thread-safe)
+    // =========================================================================
 
     private static String formatHistory(List<ChatMessage> history) {
         if (history.isEmpty()) return "";
         StringBuilder sb = new StringBuilder();
         for (ChatMessage m : history) {
             String role = "user".equals(m.role()) ? "**User**" : "**Assistant**";
-            // Show only first 500 chars of each historical message to stay concise
-            String content = truncate(m.content(), 500);
-            sb.append(role).append(": ").append(content).append("\n\n");
+            sb.append(role).append(": ").append(truncate(m.content(), 500)).append("\n\n");
         }
         return sb.toString().trim();
     }
-
-    // -------------------------------------------------------------------------
-    // Helpers
-    // -------------------------------------------------------------------------
 
     private static boolean exists(VirtualFile dir, String child) {
         return dir.findChild(child) != null;
@@ -309,9 +322,8 @@ public class ProjectContextBuilder {
     private static String readFile(VirtualFile file) {
         try {
             byte[][] buf = {null};
-            ApplicationManager.getApplication().runReadAction(() -> {
-                try { buf[0] = file.contentsToByteArray(); } catch (Exception ignored) {}
-            });
+            ApplicationManager.getApplication().runReadAction(
+                    () -> { try { buf[0] = file.contentsToByteArray(); } catch (Exception ignored) {} });
             return buf[0] != null ? new String(buf[0], file.getCharset()) : "";
         } catch (Exception e) {
             return "";
@@ -327,4 +339,20 @@ public class ProjectContextBuilder {
         int dot = path.lastIndexOf('.');
         return dot >= 0 ? path.substring(dot + 1) : "";
     }
+
+    // =========================================================================
+    // IdeSnapshot — plain data holder, safe to pass across threads
+    // =========================================================================
+
+    public record IdeSnapshot(
+            String projectName,
+            String language,
+            String framework,
+            String projectTree,
+            String currentFilePath,
+            String currentFileContent,
+            String selectedText,
+            String openFilesSection,
+            String buildFilesContent
+    ) {}
 }

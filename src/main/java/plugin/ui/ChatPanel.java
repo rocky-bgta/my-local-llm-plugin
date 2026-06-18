@@ -3,6 +3,7 @@ package plugin.ui;
 import com.intellij.icons.AllIcons;
 import com.intellij.openapi.project.Project;
 import org.jetbrains.annotations.NotNull;
+import plugin.context.GitContextBuilder;
 import plugin.context.ProjectContextBuilder;
 import plugin.llm.LMStudioClient;
 import plugin.llm.model.ChatMessage;
@@ -344,16 +345,24 @@ public class ChatPanel {
         blinkTimer.start();
         setLoading(true);
 
-        // Build enriched system prompt (IDE context + mode + session history).
-        // UI always shows the clean user text; only the LLM snapshot gets enriched.
-        String mode     = modeCombo.getSelectedItem() != null ? (String) modeCombo.getSelectedItem() : "Editing";
-        String enriched = new ProjectContextBuilder(project).buildEnrichedPrompt(text, mode, priorHistory);
+        String mode = modeCombo.getSelectedItem() != null ? (String) modeCombo.getSelectedItem() : "Editing";
 
-        // Copy history; replace the last entry with the enriched version.
+        // Phase 1 (EDT): collect IntelliJ-API-dependent context while still on the EDT.
+        ProjectContextBuilder.IdeSnapshot ideSnapshot =
+                new ProjectContextBuilder(project).collectSnapshot();
+
+        // Mutable snapshot list — the daemon thread will fill in the enriched last entry.
         List<ChatMessage> snapshot = new ArrayList<>(history);
-        snapshot.set(snapshot.size() - 1, new ChatMessage("user", enriched));
 
         daemon(() -> {
+            // Phase 2 (daemon): run git commands (blocking I/O, safe off EDT).
+            String gitSection = new GitContextBuilder(project).buildGitSection(text);
+
+            // Build the full enriched prompt entirely off the EDT.
+            String enriched = ProjectContextBuilder.buildPrompt(
+                    text, mode, priorHistory, ideSnapshot, gitSection);
+            snapshot.set(snapshot.size() - 1, new ChatMessage("user", enriched));
+
             try {
                 new LMStudioClient(endpoint).streamChat(model, snapshot,
                         token -> SwingUtilities.invokeLater(() -> appendToken(token)));
