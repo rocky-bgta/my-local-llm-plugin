@@ -22,6 +22,9 @@ public class ChatPanel {
     private final JPanel   root;
     private final Project  project;
 
+    // Mode selector
+    private JComboBox<String> modeCombo;
+
     // Chat display
     private JTextPane      chatPane;
     private StyledDocument chatDoc;
@@ -81,8 +84,16 @@ public class ChatPanel {
         gearBtn.setToolTipText("Settings");
         gearBtn.addActionListener(e -> showSettingsDialog());
 
-        JPanel right = new JPanel(new FlowLayout(FlowLayout.RIGHT, 6, 4));
+        modeCombo = new JComboBox<>(new String[]{"Planning", "Editing", "Bypass"});
+        modeCombo.setSelectedItem("Editing");
+        modeCombo.setPreferredSize(new Dimension(90, 22));
+        modeCombo.setFont(modeCombo.getFont().deriveFont(11f));
+        modeCombo.setToolTipText("Planning: analyse only  |  Editing: make changes  |  Bypass: fast, minimal explanation");
+
+        JPanel right = new JPanel(new FlowLayout(FlowLayout.RIGHT, 4, 4));
         right.setOpaque(false);
+        right.add(new JLabel("Mode:"));
+        right.add(modeCombo);
         right.add(gearBtn);
         bar.add(right, BorderLayout.EAST);
 
@@ -306,6 +317,9 @@ public class ChatPanel {
             return;
         }
 
+        // Capture prior turns BEFORE adding the current message — used as SESSION_HISTORY.
+        List<ChatMessage> priorHistory = new ArrayList<>(history);
+
         appendUserMessage(text);
         history.add(new ChatMessage("user", text));
         promptArea.setText("");
@@ -314,11 +328,12 @@ public class ChatPanel {
         blinkTimer.start();
         setLoading(true);
 
-        // Build enriched prompt with live IDE context (current file, selection, tree).
-        // The UI always shows the clean user text; only the LLM snapshot gets enriched.
-        String enriched = new ProjectContextBuilder(project).buildEnrichedPrompt(text);
+        // Build enriched system prompt (IDE context + mode + session history).
+        // UI always shows the clean user text; only the LLM snapshot gets enriched.
+        String mode     = modeCombo.getSelectedItem() != null ? (String) modeCombo.getSelectedItem() : "Editing";
+        String enriched = new ProjectContextBuilder(project).buildEnrichedPrompt(text, mode, priorHistory);
 
-        // Copy history but replace the last user message with the context-enriched version.
+        // Copy history; replace the last entry with the enriched version.
         List<ChatMessage> snapshot = new ArrayList<>(history);
         snapshot.set(snapshot.size() - 1, new ChatMessage("user", enriched));
 
