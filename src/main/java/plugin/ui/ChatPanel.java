@@ -10,6 +10,7 @@ import plugin.llm.model.ChatMessage;
 import plugin.settings.PluginSettings;
 import plugin.util.BuildUtil;
 import plugin.util.FileOperationUtil;
+import plugin.util.GitUtil;
 import plugin.util.ProjectContextUtil;
 
 import javax.swing.*;
@@ -61,6 +62,9 @@ public class ChatPanel {
     // Conversation history
     private final List<ChatMessage> history = new ArrayList<>();
 
+    // Track newly created files for Git
+    private final List<String> newlyCreatedFiles = new ArrayList<>();
+
     // Text styles
     private Style userRoleStyle;
     private Style userTextStyle;
@@ -79,6 +83,24 @@ public class ChatPanel {
         root.add(buildChatArea(),   BorderLayout.CENTER);
         root.add(buildInputPanel(), BorderLayout.SOUTH);
     }
+
+    public JTextPane getChatPane() { return chatPane; }
+    public JTextArea getPromptArea() { return promptArea; }
+    public JButton getSendBtn() { return sendBtn; }
+    public JButton getStopBtn() { return stopBtn; }
+    public JProgressBar getSpinner() { return spinner; }
+    public Timer getBlinkTimer() { return blinkTimer; }
+    public JLabel getTitleLabel() { return titleLabel; }
+    public boolean isTitleGenerated() { return titleGenerated; }
+    public int getBuildFixAttempts() { return buildFixAttempts; }
+    public List<ChatMessage> getHistory() { return history; }
+    public List<String> getNewlyCreatedFiles() { return newlyCreatedFiles; }
+    public Style getUserRoleStyle() { return userRoleStyle; }
+    public Style getUserTextStyle() { return userTextStyle; }
+    public Style getAssistantRoleStyle() { return assistantRoleStyle; }
+    public Style getAssistantTextStyle() { return assistantTextStyle; }
+    public Style getSystemStyle() { return systemStyle; }
+    public Style getCursorStyle() { return cursorStyle; }
 
     // -------------------------------------------------------------------------
     // Toolbar — title on the left, gear on the right
@@ -252,27 +274,27 @@ public class ChatPanel {
         userRoleStyle = chatPane.addStyle("userRole", base);
         StyleConstants.setForeground(userRoleStyle, new Color(0x4EC9B0));
         StyleConstants.setBold(userRoleStyle, true);
-        StyleConstants.setFontSize(userRoleStyle, 13);
+        StyleConstants.setFontSize(userRoleStyle, 16);
 
         userTextStyle = chatPane.addStyle("userText", base);
         StyleConstants.setForeground(userTextStyle, new Color(0xD4D4D4));
         StyleConstants.setFontFamily(userTextStyle, Font.SANS_SERIF);
-        StyleConstants.setFontSize(userTextStyle, 14);
+        StyleConstants.setFontSize(userTextStyle, 18);
 
         assistantRoleStyle = chatPane.addStyle("assistantRole", base);
         StyleConstants.setForeground(assistantRoleStyle, new Color(0x569CD6));
         StyleConstants.setBold(assistantRoleStyle, true);
-        StyleConstants.setFontSize(assistantRoleStyle, 13);
+        StyleConstants.setFontSize(assistantRoleStyle, 16);
 
         assistantTextStyle = chatPane.addStyle("assistantText", base);
         StyleConstants.setForeground(assistantTextStyle, new Color(0xE8E8E8));
         StyleConstants.setFontFamily(assistantTextStyle, Font.SANS_SERIF);
-        StyleConstants.setFontSize(assistantTextStyle, 14);
+        StyleConstants.setFontSize(assistantTextStyle, 18);
 
         systemStyle = chatPane.addStyle("system", base);
         StyleConstants.setForeground(systemStyle, new Color(0xCE9178));
         StyleConstants.setItalic(systemStyle, true);
-        StyleConstants.setFontSize(systemStyle, 12);
+        StyleConstants.setFontSize(systemStyle, 16);
 
         cursorStyle = chatPane.addStyle("cursor", base);
         StyleConstants.setForeground(cursorStyle, new Color(0x569CD6));
@@ -291,7 +313,7 @@ public class ChatPanel {
         ));
 
         promptArea = new JTextArea(4, 0);
-        promptArea.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 14));
+        promptArea.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 16));
         promptArea.setLineWrap(true);
         promptArea.setWrapStyleWord(true);
         promptArea.setMargin(new Insets(6, 8, 6, 8));
@@ -324,6 +346,9 @@ public class ChatPanel {
         stopBtn.setVisible(false);
         stopBtn.addActionListener(e -> {
             stopRequested = true;
+            if (currentChatThread != null) {
+                currentChatThread.interrupt();
+            }
             appendSystemMessage("Interrupted by user.");
             setLoading(false);
         });
@@ -361,6 +386,7 @@ public class ChatPanel {
     private void sendMessage() {
         String text = promptArea.getText().trim();
         if (text.isEmpty()) return;
+        newlyCreatedFiles.clear();
         buildFixAttempts = 0;
 
         PluginSettings s  = PluginSettings.getInstance();
@@ -379,6 +405,7 @@ public class ChatPanel {
                     "I have provided you with the project structure and file contents below to help you understand the codebase.\n" +
                     "Current Mode: " + mode + "\n" +
                     "When in PLANNING mode, discuss the task and outline the steps. Do not use file operation tags.\n" +
+                    "If you believe the user wants to make changes to files, suggest they switch to EDITING mode.\n" +
                     "EDITING MODE — MANDATORY FILE OPERATION RULES:\n" +
                     "In EDITING mode you MUST write files using the XML tags below. There is NO other way to write to disk.\n" +
                     "WRONG — this will NOT write the file (do not do this):\n" +
@@ -392,14 +419,26 @@ public class ChatPanel {
                     "<DELETE_FILE path=\"path/to/file\" />\n" +
                     "<DELETE_FOLDER path=\"path/to/folder\" />\n" +
                     "<RUN_TESTS />\n" +
+                    "<RUN_TESTS test=\"ClassName\" />\n" +
+                    "<CHECK_COMPILATION />\n" +
+                    "<EXECUTE_COMMAND command=\"your-command-here\" />\n" +
+                    "<GIT_ADD_NEW />\n" +
                     "Rules:\n" +
                     "1. Output the raw XML tag directly — never wrap it in ``` fences.\n" +
                     "2. Always include the COMPLETE file content inside the tag — never truncate or summarize.\n" +
                     "3. You may add a brief explanation AFTER the closing XML tag.\n" +
                     "4. If you use a ``` code block for file content, the file will NOT be changed.\n" +
-                    "5. To run all project tests, use the <RUN_TESTS /> tag. This can be combined with file changes.\n" +
+                    "5. To run all project tests, use the <RUN_TESTS /> tag.\n" +
+                    "6. To run a specific test case, use <RUN_TESTS test=\"ClassName\" /> (e.g., <RUN_TESTS test=\"ChatPanelTest\" />).\n" +
+                    "7. To check if the project compiles without running tests, use <CHECK_COMPILATION />. This will automatically detect the build system (Maven, Gradle, Go, etc.) and run the appropriate command.\n" +
+                    "8. For non-Java projects or if auto-detection fails, use <EXECUTE_COMMAND command=\"...\" /> to run build or test commands (e.g., <EXECUTE_COMMAND command=\"go build\" />).\n" +
+                    "9. To add ALL newly created files from the current task to Git, use <GIT_ADD_NEW />.\n" +
+                    "10. Tags can be combined (e.g., CREATE_FILE and then GIT_ADD_NEW).\n" +
                     "Execute tasks one by one and inform the user of your progress.\n" +
                     "When in BYPASS mode, ignore file operations and behave like a general assistant.\n" +
+                    "PLANNING mode is for discussion and outlining steps. File modification tags are ignored in this mode, but test execution and Git operations are allowed.\n" +
+                    "EDITING mode is required to write files to disk or perform delete operations.\n" +
+                    "Tests, compilation checks, custom commands, and Git operations can be run in ANY mode using the respective tags.\n" +
                     "Maintain the session context until the user says to discard it.\n" +
                     "If the user asks about the project structure or specific files, use the provided context to answer. " +
                     "Always refer to the 'Current Project Structure' section for the complete file hierarchy. " +
@@ -454,23 +493,39 @@ public class ChatPanel {
 
     private void streamAndHandle(String model, String endpoint, String userText, boolean canRetry) {
         List<ChatMessage> snapshot = new ArrayList<>(history);
-        if (snapshot.size() > 15) {
+        // History management: preserve system prompt, initial project context, and recent conversation
+        if (snapshot.size() > 30) {
             List<ChatMessage> trimmed = new ArrayList<>();
+            // 1. Always keep the system prompt (instruction)
             trimmed.add(snapshot.get(0));
-            for (int i = 1; i < snapshot.size() - 10; i++) {
-                if (snapshot.get(i).content().contains("Project Context")) trimmed.add(snapshot.get(i));
+            
+            // 2. Keep all project context messages (crucial for codebase understanding)
+            // They are usually sent at the very beginning after the system prompt
+            int lastContextIndex = 0;
+            for (int i = 1; i < snapshot.size(); i++) {
+                String content = snapshot.get(i).content();
+                if (content != null && (content.contains("Project Context") || content.contains("Received context part") || content.contains("Received project context"))) {
+                    trimmed.add(snapshot.get(i));
+                    lastContextIndex = i;
+                }
             }
-            int lastCount = Math.min(10, snapshot.size() - 1);
-            for (int i = snapshot.size() - lastCount; i < snapshot.size(); i++) trimmed.add(snapshot.get(i));
+            
+            // 3. Keep the most recent messages for conversation continuity
+            int recentCount = 20;
+            int startOfRecent = Math.max(lastContextIndex + 1, snapshot.size() - recentCount);
+            for (int i = startOfRecent; i < snapshot.size(); i++) {
+                trimmed.add(snapshot.get(i));
+            }
             snapshot = trimmed;
         }
 
         List<ChatMessage> finalSnapshot = snapshot;
         currentChatThread = new Thread(() -> {
             try {
+                stopRequested = false;
                 new LocalLLMClient(endpoint).streamChat(model, finalSnapshot,
                         token -> {
-                            if (stopRequested) throw new RuntimeException("INTERRUPTED");
+                            if (stopRequested) throw new RuntimeException("STREAM_INTERRUPTED");
                             SwingUtilities.invokeLater(() -> appendToken(token));
                         });
                 SwingUtilities.invokeLater(() -> {
@@ -484,20 +539,40 @@ public class ChatPanel {
                     }
 
                     if ("EDITING".equals(mode)) {
-                        boolean hasOps = fullResponse.contains("<CREATE_FILE") ||
-                                         fullResponse.contains("<MODIFY_FILE") ||
-                                         fullResponse.contains("<CREATE_FOLDER") ||
-                                         fullResponse.contains("<DELETE_FILE") ||
-                                         fullResponse.contains("<DELETE_FOLDER") ||
-                                         fullResponse.contains("<RUN_TESTS");
-                        if (hasOps) {
-                            boolean runTests = FileOperationUtil.processFileOperations(project, fullResponse);
-                            if (runTests) {
-                                appendSystemMessage("Test execution requested. Running tests…");
-                                scheduleTestRun();
-                            } else {
+                        boolean hasFileOps = fullResponse.contains("<CREATE_FILE") ||
+                                             fullResponse.contains("<MODIFY_FILE") ||
+                                             fullResponse.contains("<CREATE_FOLDER") ||
+                                             fullResponse.contains("<DELETE_FILE") ||
+                                             fullResponse.contains("<DELETE_FOLDER");
+                        boolean hasTests = fullResponse.contains("<RUN_TESTS") || fullResponse.contains("<CHECK_COMPILATION");
+                        boolean hasCustomCommand = fullResponse.contains("<EXECUTE_COMMAND");
+                        
+                        if (hasFileOps || hasTests || hasCustomCommand) {
+                            FileOperationUtil.FileOpResult opResult = FileOperationUtil.processFileOperations(project, fullResponse);
+                            if (opResult.createdFiles != null) {
+                                newlyCreatedFiles.addAll(opResult.createdFiles);
+                            }
+                            if (opResult.runTests) {
+                                if (opResult.testName != null) {
+                                    appendSystemMessage("Test execution requested for " + opResult.testName + ". Running tests…");
+                                    scheduleTestRun(model, endpoint, opResult.testName);
+                                } else {
+                                    appendSystemMessage("Test execution requested. Running tests…");
+                                    scheduleTestRun(model, endpoint, null);
+                                }
+                            } else if (opResult.checkCompilation) {
+                                appendSystemMessage("Compilation check requested. Running build…");
+                                scheduleBuildCheck(model, endpoint);
+                            } else if (opResult.customCommand != null) {
+                                appendSystemMessage("Custom command execution requested: " + opResult.customCommand + ". Running…");
+                                scheduleCustomCommand(opResult.customCommand);
+                            } else if (hasFileOps) {
                                 appendSystemMessage("File operations applied. Running build check…");
                                 scheduleBuildCheck(model, endpoint);
+                            }
+
+                            if (fullResponse.contains("<GIT_ADD_NEW")) {
+                                scheduleGitAdd();
                             }
                             return;
                         } else if (canRetry && isFileOpIntent(userText)) {
@@ -522,11 +597,49 @@ public class ChatPanel {
                             return;
                         } else {
                             appendSystemMessage("No file operation tags found — no files were changed. " +
-                                    "Make sure you are in EDITING mode and the model uses <MODIFY_FILE> tags.");
+                                    "Make sure the model uses <MODIFY_FILE> tags.");
                         }
-                    } else if ("PLANNING".equals(mode)) {
-                        if (fullResponse.contains("<CREATE_FILE") || fullResponse.contains("<MODIFY_FILE") || fullResponse.contains("<CREATE_FOLDER") || fullResponse.contains("<RUN_TESTS")) {
-                            appendSystemMessage("Operation detected but skipped — switch to EDITING mode to allow changes or test execution.");
+                    } else {
+                        // Not in EDITING mode
+                        boolean hasFileOps = fullResponse.contains("<CREATE_FILE") ||
+                                             fullResponse.contains("<MODIFY_FILE") ||
+                                             fullResponse.contains("<CREATE_FOLDER") ||
+                                             fullResponse.contains("<DELETE_FILE") ||
+                                             fullResponse.contains("<DELETE_FOLDER");
+
+                        if (fullResponse.contains("<RUN_TESTS") || fullResponse.contains("<CHECK_COMPILATION") || fullResponse.contains("<EXECUTE_COMMAND")) {
+                            FileOperationUtil.FileOpResult opResult = FileOperationUtil.processFileOperations(project, fullResponse);
+                            if (opResult.runTests) {
+                                if (opResult.testName != null) {
+                                    appendSystemMessage("Test execution requested for " + opResult.testName + ". Running tests…");
+                                    scheduleTestRun(model, endpoint, opResult.testName);
+                                } else {
+                                    appendSystemMessage("Test execution requested. Running tests…");
+                                    scheduleTestRun(model, endpoint, null);
+                                }
+                                return;
+                            } else if (opResult.checkCompilation) {
+                                appendSystemMessage("Compilation check requested. Running build…");
+                                scheduleBuildCheck(model, endpoint);
+                                return;
+                            } else if (opResult.customCommand != null) {
+                                appendSystemMessage("Custom command execution requested: " + opResult.customCommand + ". Running…");
+                                scheduleCustomCommand(opResult.customCommand);
+                                return;
+                            }
+                        }
+
+                        if (fullResponse.contains("<GIT_ADD_NEW")) {
+                            scheduleGitAdd();
+                            return;
+                        }
+
+                        if ("PLANNING".equals(mode)) {
+                            if (hasFileOps) {
+                                appendSystemMessage("⚠ File operation tags detected but skipped because you are in PLANNING mode. Switch to EDITING mode to allow changes.");
+                            } else if (isFileOpIntent(userText)) {
+                                appendSystemMessage("💡 It looks like you want to make changes. Please switch to EDITING mode and ask again to have the files written to disk.");
+                            }
                         }
                     }
 
@@ -535,10 +648,16 @@ public class ChatPanel {
             } catch (Exception ex) {
                 SwingUtilities.invokeLater(() -> {
                     finalizeAssistantMessage();
-                    if (!"INTERRUPTED".equals(ex.getMessage())) {
-                        appendSystemMessage("Error: " + ex.getMessage());
-                    } else {
+                    boolean isStop = "STOPPED_BY_USER".equals(ex.getMessage()) ||
+                                     "STREAM_INTERRUPTED".equals(ex.getMessage()) ||
+                                     ex instanceof InterruptedException ||
+                                     (ex.getCause() instanceof InterruptedException);
+
+                    if (isStop || stopRequested) {
                         history.add(new ChatMessage("assistant", assistantBuffer.toString() + " [Interrupted]"));
+                        // Already showed "Interrupted by user." via stop button listener
+                    } else {
+                        appendSystemMessage("Error: " + ex.getMessage());
                     }
                     setLoading(false);
                 });
@@ -627,7 +746,7 @@ public class ChatPanel {
         // Runs after all VFS write actions have been dispatched to the EDT queue
         ApplicationManager.getApplication().invokeLater(() ->
             daemon(() -> {
-                BuildUtil.BuildResult result = BuildUtil.runMavenCompile(project);
+                BuildUtil.BuildResult result = BuildUtil.runCompile(project);
                 SwingUtilities.invokeLater(() -> {
                     if (result.success()) {
                         appendSystemMessage("✓ Build successful.");
@@ -638,17 +757,17 @@ public class ChatPanel {
                         if (errors.length() > 3000) errors = errors.substring(0, 3000) + "\n[...truncated]";
                         appendSystemMessage("⚠ Build errors — asking LLM to fix (attempt " + buildFixAttempts + "/2)…");
                         history.add(new ChatMessage("user",
-                                "The code you just wrote has compile errors. Fix ALL errors now.\n" +
-                                "If a Maven dependency is missing, add it to pom.xml.\n" +
+                                "The code you just wrote has compile or build errors. Fix ALL errors now.\n" +
+                                "If a dependency is missing, add it to the appropriate configuration file.\n" +
                                 "Use <MODIFY_FILE> or <CREATE_FILE> XML tags for every file you change.\n\n" +
-                                "Compiler output:\n" + errors));
+                                "Build output:\n" + errors));
                         beginAssistantMessage();
                         blinkTimer.start();
                         streamAndHandle(model, endpoint, null, false);
                     } else {
                         String errors = result.output();
-                        appendSystemMessage("⚠ Build still failing after 2 fix attempts — manual intervention needed.\n" +
-                                errors.substring(0, Math.min(1000, errors.length())));
+                        if (errors.length() > 3000) errors = errors.substring(0, 3000) + "\n[...truncated]";
+                        appendSystemMessage("❌ Build failed:\n" + errors);
                         setLoading(false);
                     }
                 });
@@ -656,15 +775,64 @@ public class ChatPanel {
         );
     }
 
-    private void scheduleTestRun() {
+    private void scheduleTestRun(String model, String endpoint, String testName) {
         ApplicationManager.getApplication().invokeLater(() ->
             daemon(() -> {
-                BuildUtil.BuildResult result = BuildUtil.runMavenTest(project);
+                BuildUtil.BuildResult result = BuildUtil.runTest(project, testName);
                 SwingUtilities.invokeLater(() -> {
                     if (result.success()) {
-                        appendSystemMessage("✓ Tests passed successfully.\n" + result.output());
+                        appendSystemMessage("✓ Tests passed successfully.");
                     } else {
-                        appendSystemMessage("❌ Tests failed.\n" + result.output());
+                        appendSystemMessage("❌ Tests failed.");
+                    }
+
+                    if (result.testResults() != null && !result.testResults().isEmpty()) {
+                        StringBuilder table = new StringBuilder("\nTest Results:\n");
+                        table.append(String.format("%-40s | %-10s\n", "Test Name", "Status"));
+                        table.append("-".repeat(41)).append("|").append("-".repeat(11)).append("\n");
+                        for (var tr : result.testResults()) {
+                            table.append(String.format("%-40s | %-10s\n", 
+                                tr.name().length() > 40 ? tr.name().substring(0, 37) + "..." : tr.name(), 
+                                tr.status()));
+                        }
+                        appendSystemMessage(table.toString());
+                    } else {
+                        appendSystemMessage(result.output());
+                    }
+                    setLoading(false);
+                });
+            })
+        );
+    }
+
+    private void scheduleGitAdd() {
+        if (newlyCreatedFiles.isEmpty()) {
+            appendSystemMessage("No new files to add to Git.");
+            return;
+        }
+        ApplicationManager.getApplication().invokeLater(() ->
+            daemon(() -> {
+                GitUtil.GitResult result = GitUtil.addFiles(project, newlyCreatedFiles);
+                SwingUtilities.invokeLater(() -> {
+                    if (result.success()) {
+                        appendSystemMessage("✓ Successfully added " + newlyCreatedFiles.size() + " new file(s) to Git.");
+                    } else {
+                        appendSystemMessage("❌ Git add failed:\n" + result.output());
+                    }
+                });
+            })
+        );
+    }
+
+    private void scheduleCustomCommand(String command) {
+        ApplicationManager.getApplication().invokeLater(() ->
+            daemon(() -> {
+                BuildUtil.BuildResult result = BuildUtil.runCustomCommand(project, command);
+                SwingUtilities.invokeLater(() -> {
+                    if (result.success()) {
+                        appendSystemMessage("✓ Command executed successfully:\n" + result.output());
+                    } else {
+                        appendSystemMessage("❌ Command failed:\n" + result.output());
                     }
                     setLoading(false);
                 });
@@ -715,14 +883,42 @@ public class ChatPanel {
 
     private void setLoading(boolean loading) {
         isGenerating = loading;
-        if (!loading) stopRequested = false;
 
         sendBtn.setEnabled(!loading);
         stopBtn.setVisible(loading);
         spinner.setIndeterminate(loading);
         spinner.setVisible(loading);
         promptArea.setEnabled(!loading);
-        if (!loading) promptArea.requestFocusInWindow();
+        if (!loading) {
+            promptArea.requestFocusInWindow();
+            showDoneNotification();
+        }
+    }
+
+    private void showDoneNotification() {
+        SwingUtilities.invokeLater(() -> {
+            try {
+                JWindow toast = new JWindow();
+                JPanel panel = new JPanel();
+                panel.setBorder(new javax.swing.border.LineBorder(new java.awt.Color(0,0,0,120), 1, true));
+                panel.setBackground(new java.awt.Color(30, 30, 30, 230));
+                panel.setLayout(new BoxLayout(panel, BoxLayout.X_AXIS));
+                JLabel label = new JLabel("  Local LLM: Task completed.  ");
+                label.setForeground(new java.awt.Color(240, 240, 240));
+                panel.add(label);
+                toast.add(panel);
+                toast.pack();
+                java.awt.Point base = titleLabel.isShowing() ? titleLabel.getLocationOnScreen() : root.getLocationOnScreen();
+                int x = base.x + 10;
+                int y = Math.max(0, base.y - toast.getHeight() - 10);
+                toast.setLocation(x, y);
+                toast.setAlwaysOnTop(true);
+                toast.setVisible(true);
+                new javax.swing.Timer(2500, e -> toast.dispose()).start();
+            } catch (Throwable ignored) {
+                // Last resort: do nothing if even Swing is unavailable
+            }
+        });
     }
 
     private static void daemon(Runnable r) {

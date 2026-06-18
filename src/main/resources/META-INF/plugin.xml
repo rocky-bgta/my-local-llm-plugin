@@ -24,6 +24,8 @@
         <applicationService
             serviceImplementation="plugin.settings.PluginSettings"/>
 
+        <notificationGroup id="Local LLM Notification Group" displayType="BALLOON"/>
+
     </extensions>
 
 </idea-plugin>

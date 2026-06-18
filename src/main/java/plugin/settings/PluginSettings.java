@@ -12,7 +12,7 @@ public class PluginSettings implements PersistentStateComponent<PluginSettings.S
 
     public static class State {
         public String endpoint = "http://127.0.0.1:1234";
-        public String model    = "qwen2.5-coder-7b-instruct";
+        public String model = "qwen2.5-coder-7b-instruct";
         public boolean includeFullContext = true;
     }
 

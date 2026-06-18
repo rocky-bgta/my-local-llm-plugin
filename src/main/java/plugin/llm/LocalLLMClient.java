@@ -58,21 +58,32 @@ public class LocalLLMClient {
                 .timeout(Duration.ofSeconds(180))
                 .build();
 
-        var res = http.send(req, HttpResponse.BodyHandlers.ofLines());
-        res.body().forEach(line -> {
-            if (!line.startsWith("data: ")) return;
-            String data = line.substring(6).trim();
-            if ("[DONE]".equals(data)) return;
-            try {
-                JsonObject obj    = JsonParser.parseString(data).getAsJsonObject();
-                JsonArray choices = obj.getAsJsonArray("choices");
-                if (choices == null || choices.isEmpty()) return;
-                JsonObject delta  = choices.get(0).getAsJsonObject().getAsJsonObject("delta");
-                if (delta == null || !delta.has("content") || delta.get("content").isJsonNull()) return;
-                String token      = delta.get("content").getAsString();
-                if (!token.isEmpty()) onToken.accept(token);
-            } catch (Exception ignored) {}
-        });
+        try {
+            var res = http.send(req, HttpResponse.BodyHandlers.ofLines());
+            res.body().forEach(line -> {
+                if (Thread.currentThread().isInterrupted()) {
+                    // We throw a dedicated exception to be caught in ChatPanel
+                    throw new RuntimeException("STREAM_INTERRUPTED");
+                }
+                if (!line.startsWith("data: ")) return;
+                String data = line.substring(6).trim();
+                if ("[DONE]".equals(data)) return;
+                try {
+                    JsonObject obj    = JsonParser.parseString(data).getAsJsonObject();
+                    JsonArray choices = obj.getAsJsonArray("choices");
+                    if (choices == null || choices.isEmpty()) return;
+                    JsonObject delta  = choices.get(0).getAsJsonObject().getAsJsonObject("delta");
+                    if (delta == null || !delta.has("content") || delta.get("content").isJsonNull()) return;
+                    String token      = delta.get("content").getAsString();
+                    if (!token.isEmpty()) onToken.accept(token);
+                } catch (Exception ignored) {}
+            });
+        } catch (java.io.IOException e) {
+            if (e.getCause() instanceof InterruptedException || Thread.currentThread().isInterrupted()) {
+                throw new InterruptedException("STOPPED_BY_USER");
+            }
+            throw e;
+        }
     }
 
     private JsonObject buildBody(String model, List<ChatMessage> messages) {

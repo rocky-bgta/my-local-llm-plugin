@@ -19,10 +19,32 @@ public class FileOperationUtil {
     private static final Pattern DELETE_OP_PATTERN = Pattern.compile(
             "<DELETE_(FILE|FOLDER)\\s+path=\"([^\"]+)\"\\s*/>");
     private static final Pattern RUN_TESTS_PATTERN = Pattern.compile(
-            "<RUN_TESTS\\s*/>");
+            "<(RUN_TESTS|CHECK_COMPILATION)(?:\\s+test=\"([^\"]+)\")?\\s*/>");
+    private static final Pattern EXECUTE_COMMAND_PATTERN = Pattern.compile(
+            "<EXECUTE_COMMAND\\s+command=\"([^\"]+)\"\\s*/>");
 
-    public static boolean processFileOperations(Project project, String response) {
+    public static class FileOpResult {
+        public final boolean runTests;
+        public final boolean checkCompilation;
+        public final String testName;
+        public final String customCommand;
+        public final java.util.List<String> createdFiles;
+
+        public FileOpResult(boolean runTests, boolean checkCompilation, String testName, String customCommand, java.util.List<String> createdFiles) {
+            this.runTests = runTests;
+            this.checkCompilation = checkCompilation;
+            this.testName = testName;
+            this.customCommand = customCommand;
+            this.createdFiles = createdFiles;
+        }
+    }
+
+    public static FileOpResult processFileOperations(Project project, String response) {
         boolean runTests = false;
+        boolean checkCompilation = false;
+        String testName = null;
+        String customCommand = null;
+        java.util.List<String> createdFiles = new java.util.ArrayList<>();
 
         // Handle folder creation
         Matcher folderMatcher = FOLDER_OP_PATTERN.matcher(response);
@@ -45,15 +67,29 @@ public class FileOperationUtil {
             String path = fileMatcher.group(2).trim();
             String content = fixPackageDeclaration(path, stripCodeFence(fileMatcher.group(3).trim()));
             writeFile(project, path, content);
+            if ("CREATE_FILE".equals(type)) {
+                createdFiles.add(path);
+            }
         }
 
-        // Handle test run request
+        // Handle test run or compilation check request
         Matcher testMatcher = RUN_TESTS_PATTERN.matcher(response);
         if (testMatcher.find()) {
-            runTests = true;
+            if ("RUN_TESTS".equals(testMatcher.group(1))) {
+                runTests = true;
+                testName = testMatcher.group(2);
+            } else if ("CHECK_COMPILATION".equals(testMatcher.group(1))) {
+                checkCompilation = true;
+            }
         }
 
-        return runTests;
+        // Handle custom command execution
+        Matcher commandMatcher = EXECUTE_COMMAND_PATTERN.matcher(response);
+        if (commandMatcher.find()) {
+            customCommand = commandMatcher.group(1);
+        }
+
+        return new FileOpResult(runTests, checkCompilation, testName, customCommand, createdFiles);
     }
 
     private static void createFolder(Project project, String relativePath) {
