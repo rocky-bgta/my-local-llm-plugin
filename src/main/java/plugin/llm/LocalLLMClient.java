@@ -15,12 +15,12 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.function.Consumer;
 
-public class LMStudioClient {
+public class LocalLLMClient {
 
     private final String baseUrl;
     private final HttpClient http;
 
-    public LMStudioClient(String baseUrl) {
+    public LocalLLMClient(String baseUrl) {
         this.baseUrl = baseUrl.replaceAll("/+$", "");
         this.http = HttpClient.newBuilder()
                 .connectTimeout(Duration.ofSeconds(10))

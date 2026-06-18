@@ -3,7 +3,7 @@ package plugin.ui;
 import com.intellij.icons.AllIcons;
 import com.intellij.openapi.project.Project;
 import org.jetbrains.annotations.NotNull;
-import plugin.llm.LMStudioClient;
+import plugin.llm.LocalLLMClient;
 import plugin.llm.model.ChatMessage;
 import plugin.settings.PluginSettings;
 import plugin.util.FileOperationUtil;
@@ -149,7 +149,7 @@ public class ChatPanel {
             statusLabel.setText("Fetching models…");
             daemon(() -> {
                 try {
-                    List<String> models = new LMStudioClient(ep).fetchModels();
+                    List<String> models = new LocalLLMClient(ep).fetchModels();
                     SwingUtilities.invokeLater(() -> {
                         modelCombo.removeAllItems();
                         models.forEach(modelCombo::addItem);
@@ -342,6 +342,8 @@ public class ChatPanel {
                     "<CREATE_FOLDER path=\"path/to/folder\" />\n" +
                     "<CREATE_FILE path=\"path/to/file\">content</CREATE_FILE>\n" +
                     "<MODIFY_FILE path=\"path/to/file\">new content</MODIFY_FILE>\n" +
+                    "<DELETE_FILE path=\"path/to/file\" />\n" +
+                    "<DELETE_FOLDER path=\"path/to/folder\" />\n" +
                     "In EDITING mode, you should execute tasks one by one and inform the user of your progress.\n" +
                     "When in BYPASS mode, ignore file operations and behave like a general assistant.\n" +
                     "Maintain the session context until the user says to discard it.\n" +
@@ -416,7 +418,7 @@ public class ChatPanel {
         List<ChatMessage> finalSnapshot = snapshot;
         daemon(() -> {
             try {
-                new LMStudioClient(endpoint).streamChat(model, finalSnapshot,
+                new LocalLLMClient(endpoint).streamChat(model, finalSnapshot,
                         token -> SwingUtilities.invokeLater(() -> appendToken(token)));
                 SwingUtilities.invokeLater(() -> {
                     finalizeAssistantMessage();
@@ -425,9 +427,9 @@ public class ChatPanel {
                     
                     if ("EDITING".equals(mode)) {
                         FileOperationUtil.processFileOperations(project, fullResponse);
-                    } else {
+                    } else if ("PLANNING".equals(mode)) {
                         if (fullResponse.contains("<CREATE_FILE") || fullResponse.contains("<MODIFY_FILE") || fullResponse.contains("<CREATE_FOLDER")) {
-                            appendSystemMessage("File operations detected but skipped because current mode is " + mode + ". Switch to EDITING mode to allow file changes.");
+                            appendSystemMessage("File operations detected but skipped because current mode is PLANNING. Switch to EDITING mode to allow file changes.");
                         }
                     }
                     

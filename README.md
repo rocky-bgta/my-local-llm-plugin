@@ -31,7 +31,7 @@ target/local-llm-assistant.jar
 ```
 
 > **Note:** The `intellij.lib` property in `pom.xml` defaults to
-> `C:/Program Files/JetBrains/IntelliJ IDEA 2025.2.5/lib`.
+> `C:/Program Files/JetBrains/IntelliJIdea2025.2.5/lib`.
 > If your IntelliJ is installed elsewhere, update that property before building:
 >
 > ```xml
@@ -42,9 +42,9 @@ target/local-llm-assistant.jar
 
 ## Author
 
-- **Jane Smith** (jane.smith@example.com)
+- **Rocky** (rocky@example.com)
 
---- 
+---
 
 ## Install the Plugin
 
@@ -91,5 +91,3 @@ target/local-llm-assistant.jar
 ---
 
 ## Using the Plugin
-
-#

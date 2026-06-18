@@ -16,6 +16,8 @@ public class FileOperationUtil {
             "<(CREATE_FILE|MODIFY_FILE)\\s+path=\"([^\"]+)\">\\s*(.*?)\\s*</\\1>", Pattern.DOTALL);
     private static final Pattern FOLDER_OP_PATTERN = Pattern.compile(
             "<CREATE_FOLDER\\s+path=\"([^\"]+)\"\\s*/>");
+    private static final Pattern DELETE_OP_PATTERN = Pattern.compile(
+            "<DELETE_(FILE|FOLDER)\\s+path=\"([^\"]+)\"\\s*/>");
 
     public static void processFileOperations(Project project, String response) {
         // Handle folder creation
@@ -23,6 +25,13 @@ public class FileOperationUtil {
         while (folderMatcher.find()) {
             String path = folderMatcher.group(1).trim();
             createFolder(project, path);
+        }
+
+        // Handle deletions
+        Matcher deleteMatcher = DELETE_OP_PATTERN.matcher(response);
+        while (deleteMatcher.find()) {
+            String path = deleteMatcher.group(2).trim();
+            deletePath(project, path);
         }
 
         // Handle file creation/modification
@@ -51,6 +60,25 @@ public class FileOperationUtil {
                             child = current.createChildDirectory(null, part);
                         }
                         current = child;
+                    }
+                } catch (IOException e) {
+                    // Log error
+                }
+            });
+        });
+    }
+
+    private static void deletePath(Project project, String relativePath) {
+        ApplicationManager.getApplication().invokeLater(() -> {
+            ApplicationManager.getApplication().runWriteAction(() -> {
+                try {
+                    VirtualFile baseDir = project.getBaseDir();
+                    if (baseDir == null) return;
+
+                    String normalizedPath = relativePath.replace("\\", "/");
+                    VirtualFile target = baseDir.findFileByRelativePath(normalizedPath);
+                    if (target != null && target.exists()) {
+                        target.delete(null);
                     }
                 } catch (IOException e) {
                     // Log error

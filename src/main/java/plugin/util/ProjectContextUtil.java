@@ -128,7 +128,7 @@ public class ProjectContextUtil {
         if (name.equals("plugin.xml")) return "Plugin descriptor (ID, actions, extensions)";
         if (name.equals("ChatPanel.java")) return "Main chat UI panel with streaming output";
         if (name.equals("ProjectContextUtil.java")) return "Builds project structure context for LLM";
-        if (name.equals("LMStudioClient.java")) return "HTTP client for LLM Studio / Ollama API";
+        if (name.equals("LocalLLMClient.java")) return "HTTP client for LLM Studio / Ollama API";
         if (name.equals("ChatMessage.java")) return "Chat message data model";
         if (name.equals("PluginSettings.java")) return "Persistent plugin settings (PersistentStateComponent)";
         if (name.equals("ChatToolWindowFactory.java")) return "Registers the chat tool window in the IDE";
