@@ -14,7 +14,8 @@ public class ChatToolWindowFactory implements ToolWindowFactory {
     public void createToolWindowContent(@NotNull Project project, @NotNull ToolWindow toolWindow) {
         ChatPanel panel = new ChatPanel(project);
         Content content = ContentFactory.getInstance()
-                .createContent(panel.getSwingComponent(), "", false);
+                .createContent(panel.getSwingComponent(), "New Chat", false);
+        panel.setTabContent(content);
         toolWindow.getContentManager().addContent(content);
     }
 }

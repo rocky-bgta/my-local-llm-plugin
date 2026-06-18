@@ -85,3 +85,5 @@ target/local-llm-assistant.jar
 ---
 
 ## Using the Plugin
+
+Thank you for using Local LLM Assistant!

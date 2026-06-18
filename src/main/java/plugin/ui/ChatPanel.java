@@ -2,6 +2,7 @@ package plugin.ui;
 
 import com.intellij.icons.AllIcons;
 import com.intellij.openapi.project.Project;
+import com.intellij.ui.content.Content;
 import org.jetbrains.annotations.NotNull;
 import plugin.llm.LocalLLMClient;
 import plugin.llm.model.ChatMessage;
@@ -26,6 +27,11 @@ public class ChatPanel {
     // Mode
     private String mode = "PLANNING";
     private JComboBox<String> modeCombo;
+
+    // Dynamic tab/toolbar title
+    private JLabel  titleLabel;
+    private Content tabContent;
+    private boolean titleGenerated = false;
 
     // Chat display
     private JTextPane      chatPane;
@@ -76,9 +82,9 @@ public class ChatPanel {
         ));
         bar.setPreferredSize(new Dimension(0, 36));
 
-        JLabel title = new JLabel("  Local LLM");
-        title.setFont(title.getFont().deriveFont(Font.BOLD, 13f));
-        bar.add(title, BorderLayout.WEST);
+        titleLabel = new JLabel("  New Chat");
+        titleLabel.setFont(titleLabel.getFont().deriveFont(Font.BOLD, 13f));
+        bar.add(titleLabel, BorderLayout.WEST);
 
         modeCombo = new JComboBox<>(new String[]{"PLANNING", "EDITING", "BYPASS"});
         modeCombo.setSelectedItem("PLANNING");
@@ -92,6 +98,9 @@ public class ChatPanel {
             initStyles();
             chatPane.setStyledDocument(chatDoc);
             appendSystemMessage("Conversation history cleared.");
+            titleGenerated = false;
+            titleLabel.setText("  New Chat");
+            if (tabContent != null) tabContent.setDisplayName("New Chat");
         });
 
         JButton gearBtn = new JButton(AllIcons.General.Settings);
@@ -340,19 +349,24 @@ public class ChatPanel {
                     "I have provided you with the project structure and file contents below to help you understand the codebase.\n" +
                     "Current Mode: " + mode + "\n" +
                     "When in PLANNING mode, discuss the task and outline the steps. Do not use file operation tags.\n" +
-                    "When in EDITING mode, you MUST use the following XML operation tags to actually write files to disk. " +
-                    "Do NOT show file content in markdown code blocks — that only displays text and does NOT update any file. " +
-                    "The ONLY way to create or modify a file is to emit the exact XML tag below with the full file content inside it:\n" +
+                    "EDITING MODE — MANDATORY FILE OPERATION RULES:\n" +
+                    "In EDITING mode you MUST write files using the XML tags below. There is NO other way to write to disk.\n" +
+                    "WRONG — this will NOT write the file (do not do this):\n" +
+                    "```markdown\n...file content...\n```\n" +
+                    "CORRECT — this WILL write the file (always do this instead):\n" +
+                    "<MODIFY_FILE path=\"path/to/file\">complete new file content here</MODIFY_FILE>\n" +
+                    "All available tags:\n" +
+                    "<MODIFY_FILE path=\"path/to/file\">complete new file content</MODIFY_FILE>\n" +
+                    "<CREATE_FILE path=\"path/to/file\">complete file content</CREATE_FILE>\n" +
                     "<CREATE_FOLDER path=\"path/to/folder\" />\n" +
-                    "<CREATE_FILE path=\"path/to/file\">full file content here</CREATE_FILE>\n" +
-                    "<MODIFY_FILE path=\"path/to/file\">full new file content here</MODIFY_FILE>\n" +
                     "<DELETE_FILE path=\"path/to/file\" />\n" +
                     "<DELETE_FOLDER path=\"path/to/folder\" />\n" +
-                    "Rules for EDITING mode:\n" +
-                    "1. Always emit the XML tag with the complete file content — never truncate or summarize.\n" +
-                    "2. Never wrap the XML tag in a markdown code block (no ```xml fences around the tag itself).\n" +
-                    "3. After the XML tag you may briefly explain what you changed.\n" +
-                    "In EDITING mode, you should execute tasks one by one and inform the user of your progress.\n" +
+                    "Rules:\n" +
+                    "1. Output the raw XML tag directly — never wrap it in ``` fences.\n" +
+                    "2. Always include the COMPLETE file content inside the tag — never truncate or summarize.\n" +
+                    "3. You may add a brief explanation AFTER the closing XML tag.\n" +
+                    "4. If you use a ``` code block for file content, the file will NOT be changed.\n" +
+                    "Execute tasks one by one and inform the user of your progress.\n" +
                     "When in BYPASS mode, ignore file operations and behave like a general assistant.\n" +
                     "Maintain the session context until the user says to discard it.\n" +
                     "If the user asks about the project structure or specific files, use the provided context to answer. " +
@@ -403,25 +417,19 @@ public class ChatPanel {
         blinkTimer.start();
         setLoading(true);
 
+        streamAndHandle(model, endpoint, text, true);
+    }
+
+    private void streamAndHandle(String model, String endpoint, String userText, boolean canRetry) {
         List<ChatMessage> snapshot = new ArrayList<>(history);
-        // History management: keep system prompt, context messages, and last 10 messages
         if (snapshot.size() > 15) {
             List<ChatMessage> trimmed = new ArrayList<>();
-            trimmed.add(snapshot.get(0)); // Keep system prompt
-            
-            // Keep any context-related messages
+            trimmed.add(snapshot.get(0));
             for (int i = 1; i < snapshot.size() - 10; i++) {
-                ChatMessage m = snapshot.get(i);
-                if (m.content().contains("Project Context")) {
-                    trimmed.add(m);
-                }
+                if (snapshot.get(i).content().contains("Project Context")) trimmed.add(snapshot.get(i));
             }
-            
-            // Keep last 10 messages
             int lastCount = Math.min(10, snapshot.size() - 1);
-            for (int i = snapshot.size() - lastCount; i < snapshot.size(); i++) {
-                trimmed.add(snapshot.get(i));
-            }
+            for (int i = snapshot.size() - lastCount; i < snapshot.size(); i++) trimmed.add(snapshot.get(i));
             snapshot = trimmed;
         }
 
@@ -434,7 +442,12 @@ public class ChatPanel {
                     finalizeAssistantMessage();
                     String fullResponse = assistantBuffer.toString();
                     history.add(new ChatMessage("assistant", fullResponse));
-                    
+
+                    if (!titleGenerated && userText != null) {
+                        titleGenerated = true;
+                        generateTitle(userText);
+                    }
+
                     if ("EDITING".equals(mode)) {
                         boolean hasOps = fullResponse.contains("<CREATE_FILE") ||
                                          fullResponse.contains("<MODIFY_FILE") ||
@@ -444,16 +457,29 @@ public class ChatPanel {
                         if (hasOps) {
                             FileOperationUtil.processFileOperations(project, fullResponse);
                             appendSystemMessage("File operations applied.");
+                        } else if (canRetry && fullResponse.contains("```") && isFileOpIntent(userText)) {
+                            // Model used a code block — auto-correct once
+                            appendSystemMessage("⚠ Model used a code block instead of XML tags — auto-correcting…");
+                            history.add(new ChatMessage("user",
+                                    "CORRECTION REQUIRED: You responded with file content inside a ``` code block. " +
+                                    "A code block is display-only — it does NOT write to disk. " +
+                                    "You MUST re-send your response using only the XML tag:\n" +
+                                    "<MODIFY_FILE path=\"path/to/file\">complete new file content</MODIFY_FILE>\n" +
+                                    "Output the raw XML tag directly — no ``` fences around it."));
+                            beginAssistantMessage();
+                            blinkTimer.start();
+                            streamAndHandle(model, endpoint, null, false);
+                            return;
                         } else {
-                            appendSystemMessage("No file operation tags found in the response — no files were changed. " +
-                                    "If you expected a file to be modified, ask again in EDITING mode; the model must use <MODIFY_FILE> tags.");
+                            appendSystemMessage("No file operation tags found — no files were changed. " +
+                                    "Make sure you are in EDITING mode and the model uses <MODIFY_FILE> tags.");
                         }
                     } else if ("PLANNING".equals(mode)) {
                         if (fullResponse.contains("<CREATE_FILE") || fullResponse.contains("<MODIFY_FILE") || fullResponse.contains("<CREATE_FOLDER")) {
-                            appendSystemMessage("File operations detected but skipped because current mode is PLANNING. Switch to EDITING mode to allow file changes.");
+                            appendSystemMessage("File operations detected but skipped — switch to EDITING mode to allow file changes.");
                         }
                     }
-                    
+
                     setLoading(false);
                 });
             } catch (Exception ex) {
@@ -540,6 +566,46 @@ public class ChatPanel {
     // -------------------------------------------------------------------------
     // Utilities
     // -------------------------------------------------------------------------
+
+    private static boolean isFileOpIntent(String userText) {
+        if (userText == null) return false;
+        String lower = userText.toLowerCase();
+        return lower.contains("edit") || lower.contains("modify") || lower.contains("update") ||
+               lower.contains("create") || lower.contains("delete") || lower.contains("change") ||
+               lower.contains("write") || lower.contains("fix") || lower.contains("remove") ||
+               lower.contains("rename") || lower.contains("replace") || lower.contains("refactor") ||
+               lower.contains("implement") || lower.contains("add") && (lower.contains("file") || lower.contains("class") || lower.contains("method"));
+    }
+
+    public void setTabContent(Content content) {
+        this.tabContent = content;
+    }
+
+    private void generateTitle(String firstUserMessage) {
+        PluginSettings s = PluginSettings.getInstance();
+        String model    = s.getModel();
+        String endpoint = s.getEndpoint();
+        if (model == null || model.isBlank()) return;
+
+        String excerpt = firstUserMessage.substring(0, Math.min(200, firstUserMessage.length()));
+        List<ChatMessage> req = List.of(new ChatMessage("user",
+                "Give a very short title (3-5 words) for a chat conversation that starts with: \""
+                + excerpt + "\". Reply with ONLY the title, no quotes, no explanation."));
+
+        daemon(() -> {
+            StringBuilder buf = new StringBuilder();
+            try {
+                new LocalLLMClient(endpoint).streamChat(model, req, buf::append);
+                String title = buf.toString().trim().replaceAll("^[\"']+|[\"']+$", "");
+                if (!title.isEmpty()) {
+                    SwingUtilities.invokeLater(() -> {
+                        titleLabel.setText("  " + title);
+                        if (tabContent != null) tabContent.setDisplayName(title);
+                    });
+                }
+            } catch (Exception ignored) {}
+        });
+    }
 
     private void setLoading(boolean loading) {
         sendBtn.setEnabled(!loading);
