@@ -349,7 +349,9 @@ public class ChatPanel {
                     "Maintain the session context until the user says to discard it.\n" +
                     "If the user asks about the project structure or specific files, use the provided context to answer. " +
                     "Always refer to the 'Current Project Structure' section for the complete file hierarchy. " +
-                    "Do NOT hallucinate or assume any project structure that is not explicitly listed there.";
+                    "If a file is not listed there, it does not exist in the project.\n" +
+                    "When asked for the project structure, provide ONLY the visual tree representation (using ├──, └──, │) from the 'Current Project Structure' section. " +
+                    "DO NOT include file contents, headers like '--- CONTENT START ---', or any additional text within the tree code block.";
             
             history.add(new ChatMessage("system", systemInstructions));
 

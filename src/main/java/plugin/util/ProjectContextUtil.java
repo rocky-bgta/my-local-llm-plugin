@@ -18,16 +18,85 @@ public class ProjectContextUtil {
 
         sb.append("Current Project Structure:\n");
         sb.append("Note: Directories like target/, out/, node_modules/ and hidden files are excluded.\n\n");
-        appendFileTree(baseDir, "", sb, false, 8000); // Increased limit for structure
+        sb.append(baseDir.getName()).append("/\n");
+        appendTree(baseDir, "", sb, 16000);
 
         if (includeContent) {
             sb.append("\nDetailed File Contents:\n");
-            // Increased limit to stay within common 128k context windows often used today, 
-            // but still being conservative for LM Studio's default models.
-            int maxChars = 64000; 
-            appendFileTree(baseDir, "", sb, true, maxChars);
+            int maxChars = 64000;
+            appendFileContents(baseDir, sb, maxChars);
         }
         return sb.toString();
+    }
+
+    private static void appendTree(VirtualFile file, String indent, StringBuilder sb, int maxChars) {
+        if (sb.length() > maxChars) return;
+
+        VirtualFile[] children = file.getChildren();
+        if (children == null) return;
+
+        List<VirtualFile> filtered = new ArrayList<>();
+        for (VirtualFile child : children) {
+            if (shouldExclude(child.getName())) continue;
+            filtered.add(child);
+        }
+
+        for (int i = 0; i < filtered.size(); i++) {
+            VirtualFile child = filtered.get(i);
+            boolean isLast = (i == filtered.size() - 1);
+
+            sb.append(indent).append(isLast ? "└── " : "├── ").append(child.getName());
+            if (child.isDirectory()) {
+                sb.append("/");
+            }
+            sb.append("\n");
+
+            if (child.isDirectory()) {
+                // Special case for target: don't recurse
+                if (child.getName().equals("target")) continue;
+                appendTree(child, indent + (isLast ? "    " : "│   "), sb, maxChars);
+            }
+        }
+    }
+
+    private static void appendFileContents(VirtualFile file, StringBuilder sb, int maxChars) {
+        appendFileContentsRecursive(file, sb, maxChars);
+    }
+
+    private static void appendFileContentsRecursive(VirtualFile file, StringBuilder sb, int maxChars) {
+        if (sb.length() > maxChars) return;
+        if (shouldExclude(file.getName())) return;
+
+        if (file.isDirectory()) {
+            if (file.getName().equals("target")) return;
+            VirtualFile[] children = file.getChildren();
+            if (children != null) {
+                for (VirtualFile child : children) {
+                    appendFileContentsRecursive(child, sb, maxChars);
+                }
+            }
+        } else {
+            try {
+                if (isTextFile(file) && file.getLength() < 50000) {
+                    sb.append("\n--- FILE: ").append(file.getName()).append(" ---\n");
+                    String content = new String(file.contentsToByteArray(), StandardCharsets.UTF_8);
+
+                    int remaining = maxChars - sb.length();
+                    if (remaining > 0) {
+                        if (content.length() > remaining) {
+                            content = content.substring(0, remaining) + "\n... (content truncated)";
+                        }
+                        sb.append(content).append("\n");
+                    }
+                }
+            } catch (IOException e) {
+                sb.append("\n--- FILE: ").append(file.getName()).append(" (Error reading: ").append(e.getMessage()).append(") ---\n");
+            }
+        }
+    }
+
+    private static boolean shouldExclude(String name) {
+        return (name.startsWith(".") && !name.equals(".gitignore")) || name.equals("out") || name.equals("node_modules");
     }
 
     /**
@@ -42,82 +111,6 @@ public class ProjectContextUtil {
             chunks.add(text.substring(i, Math.min(length, i + chunkSize)));
         }
         return chunks;
-    }
-
-    private static void appendFileTree(VirtualFile file, String indent, StringBuilder sb, boolean includeContent, int maxChars) {
-        appendFileTreeRecursive(file, "", true, sb, includeContent, maxChars);
-    }
-
-    private static void appendFileTreeRecursive(VirtualFile file, String indent, boolean isLast, StringBuilder sb, boolean includeContent, int maxChars) {
-        if (sb.length() > maxChars) return;
-
-        String fileName = file.getName();
-        // Adjust exclusions: allow .gitignore and target (per user request)
-        if (fileName.startsWith(".") && !fileName.equals(".gitignore")) {
-            return;
-        }
-        if (fileName.equals("out") || fileName.equals("node_modules")) {
-            return;
-        }
-
-        String prefix = indent.isEmpty() ? "" : (isLast ? "└── " : "├── ");
-        sb.append(indent).append(prefix).append(fileName).append(file.isDirectory() ? "/" : "");
-
-        // Add descriptions for key files
-        String description = getFileDescription(file);
-        if (description != null) {
-            sb.append("         # ").append(description);
-        }
-        sb.append("\n");
-
-        if (file.isDirectory()) {
-            // Special case: don't recurse into target/ to keep it clean, but show it exists
-            if (fileName.equals("target")) {
-                return;
-            }
-
-            VirtualFile[] children = file.getChildren();
-            if (children != null) {
-                // Filter children to avoid showing excluded ones in the count
-                List<VirtualFile> filteredChildren = new ArrayList<>();
-                for (VirtualFile child : children) {
-                    String childName = child.getName();
-                    if (childName.startsWith(".") && !childName.equals(".gitignore")) continue;
-                    if (childName.equals("out") || childName.equals("node_modules")) continue;
-                    filteredChildren.add(child);
-                }
-
-                String newIndent = indent + (indent.isEmpty() ? "" : (isLast ? "    " : "│   "));
-                for (int i = 0; i < filteredChildren.size(); i++) {
-                    appendFileTreeRecursive(filteredChildren.get(i), newIndent, i == filteredChildren.size() - 1, sb, includeContent, maxChars);
-                }
-            }
-        } else {
-            if (includeContent) {
-                try {
-                    // Only include text files and reasonably sized files
-                    if (isTextFile(file) && file.getLength() < 50000) {
-                        String content = new String(file.contentsToByteArray(), StandardCharsets.UTF_8);
-                        
-                        int remaining = maxChars - sb.length();
-                        if (remaining > 0) {
-                            if (content.length() > remaining) {
-                                content = content.substring(0, remaining) + "\n... (content truncated)";
-                            }
-                            String contentIndent = indent + (isLast ? "    " : "│   ");
-                            sb.append(contentIndent).append("  --- CONTENT START ---\n");
-                            // Indent content for readability
-                            for (String line : content.split("\n")) {
-                                sb.append(contentIndent).append("  ").append(line).append("\n");
-                            }
-                            sb.append(contentIndent).append("  --- CONTENT END ---\n");
-                        }
-                    }
-                } catch (IOException e) {
-                    sb.append(indent).append("  Error reading file: ").append(e.getMessage()).append("\n");
-                }
-            }
-        }
     }
 
     private static String getFileDescription(VirtualFile file) {

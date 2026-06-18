@@ -40,12 +40,6 @@ target/local-llm-assistant.jar
 
 ---
 
-## Author
-
-- **Rocky** (rocky@example.com)
-
----
-
 ## Install the Plugin
 
 ### Option A — Install from Disk (recommended for development)
