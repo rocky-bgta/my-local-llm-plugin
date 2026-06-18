@@ -11,6 +11,7 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.List;
 import java.util.function.Consumer;
 
@@ -25,6 +26,10 @@ public class LMStudioClient {
                 .connectTimeout(Duration.ofSeconds(10))
                 .build();
     }
+
+    // -------------------------------------------------------------------------
+    // Model list
+    // -------------------------------------------------------------------------
 
     public List<String> fetchModels() throws Exception {
         HttpRequest req = HttpRequest.newBuilder()
@@ -42,8 +47,15 @@ public class LMStudioClient {
         return ids;
     }
 
-    // Streams the assistant reply token-by-token via SSE.
-    // Blocks until the server sends [DONE]. onToken is called for each text chunk.
+    // -------------------------------------------------------------------------
+    // Streaming chat
+    // -------------------------------------------------------------------------
+
+    /**
+     * Streams the assistant reply token-by-token via SSE.
+     * Messages that carry images use the vision content-array format;
+     * text-only messages use the plain string format.
+     */
     public void streamChat(String model, List<ChatMessage> messages,
                            Consumer<String> onToken) throws Exception {
         JsonObject body = buildBody(model, messages);
@@ -73,6 +85,10 @@ public class LMStudioClient {
         });
     }
 
+    // -------------------------------------------------------------------------
+    // Request body builder
+    // -------------------------------------------------------------------------
+
     private JsonObject buildBody(String model, List<ChatMessage> messages) {
         JsonObject body = new JsonObject();
         body.addProperty("model",  model);
@@ -81,11 +97,60 @@ public class LMStudioClient {
         JsonArray msgs = new JsonArray();
         for (ChatMessage m : messages) {
             JsonObject msg = new JsonObject();
-            msg.addProperty("role",    m.role());
-            msg.addProperty("content", m.content());
+            msg.addProperty("role", m.role());
+
+            if (m.hasImages()) {
+                // Vision format: content is a JSON array of parts
+                JsonArray contentArray = new JsonArray();
+
+                // Text part
+                JsonObject textPart = new JsonObject();
+                textPart.addProperty("type", "text");
+                textPart.addProperty("text", m.content());
+                contentArray.add(textPart);
+
+                // Image parts
+                for (byte[] imgBytes : m.images()) {
+                    String mime   = detectMimeType(imgBytes);
+                    String b64    = Base64.getEncoder().encodeToString(imgBytes);
+                    JsonObject imgUrlObj = new JsonObject();
+                    imgUrlObj.addProperty("url", "data:" + mime + ";base64," + b64);
+
+                    JsonObject imgPart = new JsonObject();
+                    imgPart.addProperty("type", "image_url");
+                    imgPart.add("image_url", imgUrlObj);
+                    contentArray.add(imgPart);
+                }
+
+                msg.add("content", contentArray);
+            } else {
+                msg.addProperty("content", m.content());
+            }
+
             msgs.add(msg);
         }
         body.add("messages", msgs);
         return body;
+    }
+
+    // -------------------------------------------------------------------------
+    // MIME detection from magic bytes
+    // -------------------------------------------------------------------------
+
+    private static String detectMimeType(byte[] b) {
+        if (b.length >= 4
+                && b[0] == (byte) 0x89 && b[1] == 'P' && b[2] == 'N' && b[3] == 'G') {
+            return "image/png";
+        }
+        if (b.length >= 2
+                && b[0] == (byte) 0xFF && b[1] == (byte) 0xD8) {
+            return "image/jpeg";
+        }
+        if (b.length >= 12
+                && b[0] == 'R' && b[1] == 'I' && b[2] == 'F' && b[3] == 'F'
+                && b[8] == 'W' && b[9] == 'E' && b[10] == 'B' && b[11] == 'P') {
+            return "image/webp";
+        }
+        return "image/png";
     }
 }

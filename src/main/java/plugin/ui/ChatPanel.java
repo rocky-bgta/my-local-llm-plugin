@@ -9,12 +9,18 @@ import plugin.llm.LMStudioClient;
 import plugin.llm.model.ChatMessage;
 import plugin.settings.PluginSettings;
 
+import javax.imageio.ImageIO;
 import javax.swing.*;
 import javax.swing.border.EmptyBorder;
 import javax.swing.text.*;
 import java.awt.*;
-import java.awt.event.KeyAdapter;
-import java.awt.event.KeyEvent;
+import java.awt.datatransfer.DataFlavor;
+import java.awt.datatransfer.Transferable;
+import java.awt.dnd.*;
+import java.awt.event.*;
+import java.awt.image.BufferedImage;
+import java.io.*;
+import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -25,6 +31,10 @@ public class ChatPanel {
 
     // Mode selector
     private JComboBox<String> modeCombo;
+
+    // Pending image attachments (cleared after each Send)
+    private final List<byte[]> pendingImages    = new ArrayList<>();
+    private       JPanel       imagePreviewPanel;
 
     // Chat display
     private JTextPane      chatPane;
@@ -264,18 +274,26 @@ public class ChatPanel {
     // -------------------------------------------------------------------------
 
     private JPanel buildInputPanel() {
-        JPanel panel = new JPanel(new BorderLayout(0, 6));
+        JPanel panel = new JPanel(new BorderLayout(0, 4));
         panel.setBorder(BorderFactory.createCompoundBorder(
                 BorderFactory.createMatteBorder(1, 0, 0, 0,
                         UIManager.getColor("Separator.foreground")),
-                new EmptyBorder(8, 10, 10, 10)));
+                new EmptyBorder(6, 10, 10, 10)));
 
+        // ── Image preview strip (hidden when empty) ───────────────────────────
+        imagePreviewPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 4));
+        imagePreviewPanel.setVisible(false);
+        imagePreviewPanel.setBorder(BorderFactory.createMatteBorder(
+                0, 0, 1, 0, UIManager.getColor("Separator.foreground")));
+
+        // ── Prompt textarea ───────────────────────────────────────────────────
         promptArea = new JTextArea(4, 0);
         promptArea.setFont(new Font(UI_FONT, Font.PLAIN, 15));
         promptArea.setLineWrap(true);
         promptArea.setWrapStyleWord(true);
         promptArea.setMargin(new Insets(6, 8, 6, 8));
-        // Enter = send   |   Shift+Enter = newline
+
+        // Enter = send | Shift+Enter = newline
         promptArea.addKeyListener(new KeyAdapter() {
             @Override
             public void keyPressed(KeyEvent e) {
@@ -286,10 +304,48 @@ public class ChatPanel {
             }
         });
 
+        // Ctrl+V: paste image from clipboard first, fall back to text paste
+        KeyStroke ctrlV = KeyStroke.getKeyStroke(KeyEvent.VK_V, InputEvent.CTRL_DOWN_MASK);
+        promptArea.getInputMap().put(ctrlV, "smartPaste");
+        promptArea.getActionMap().put("smartPaste", new AbstractAction() {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                if (!tryPasteImageFromClipboard()) promptArea.paste();
+            }
+        });
+
+        // Drag-and-drop image files onto the input area
+        promptArea.setDropTarget(new DropTarget() {
+            @Override
+            public synchronized void drop(DropTargetDropEvent evt) {
+                evt.acceptDrop(DnDConstants.ACTION_COPY);
+                try {
+                    Transferable t = evt.getTransferable();
+                    if (t.isDataFlavorSupported(DataFlavor.javaFileListFlavor)) {
+                        @SuppressWarnings("unchecked")
+                        List<File> files = (List<File>) t.getTransferData(DataFlavor.javaFileListFlavor);
+                        for (File f : files) {
+                            String n = f.getName().toLowerCase();
+                            if (n.endsWith(".png") || n.endsWith(".jpg")
+                                    || n.endsWith(".jpeg") || n.endsWith(".webp")) {
+                                addPendingImage(Files.readAllBytes(f.toPath()));
+                            }
+                        }
+                        evt.dropComplete(true);
+                    } else {
+                        evt.rejectDrop();
+                    }
+                } catch (Exception ex) {
+                    evt.rejectDrop();
+                }
+            }
+        });
+
         JScrollPane promptScroll = new JScrollPane(promptArea);
         promptScroll.setVerticalScrollBarPolicy(ScrollPaneConstants.VERTICAL_SCROLLBAR_AS_NEEDED);
         promptScroll.setHorizontalScrollBarPolicy(ScrollPaneConstants.HORIZONTAL_SCROLLBAR_NEVER);
 
+        // ── Buttons ───────────────────────────────────────────────────────────
         sendBtn = new JButton("Send");
         sendBtn.setPreferredSize(new Dimension(80, 28));
         sendBtn.addActionListener(e -> sendMessage());
@@ -300,6 +356,11 @@ public class ChatPanel {
             history.clear();
         });
 
+        // Attach button — opens file chooser for image files
+        JButton attachBtn = new JButton("📎");
+        attachBtn.setToolTipText("Attach image (or drag-and-drop / Ctrl+V)");
+        attachBtn.addActionListener(e -> chooseImageFile());
+
         spinner = new JProgressBar();
         spinner.setIndeterminate(false);
         spinner.setPreferredSize(new Dimension(80, 14));
@@ -308,12 +369,14 @@ public class ChatPanel {
         JPanel ctrlRow  = new JPanel(new BorderLayout(4, 0));
         JPanel leftCtrl = new JPanel(new FlowLayout(FlowLayout.LEFT, 4, 0));
         leftCtrl.add(clearBtn);
+        leftCtrl.add(attachBtn);
         leftCtrl.add(spinner);
         ctrlRow.add(leftCtrl, BorderLayout.WEST);
         ctrlRow.add(sendBtn,  BorderLayout.EAST);
 
-        panel.add(promptScroll, BorderLayout.CENTER);
-        panel.add(ctrlRow,      BorderLayout.SOUTH);
+        panel.add(imagePreviewPanel, BorderLayout.NORTH);
+        panel.add(promptScroll,      BorderLayout.CENTER);
+        panel.add(ctrlRow,           BorderLayout.SOUTH);
         return panel;
     }
 
@@ -337,8 +400,13 @@ public class ChatPanel {
         // Capture prior turns BEFORE adding the current message — used as SESSION_HISTORY.
         List<ChatMessage> priorHistory = new ArrayList<>(history);
 
-        appendUserMessage(text);
-        history.add(new ChatMessage("user", text));
+        // Capture and clear pending images (must happen on EDT before daemon starts)
+        List<byte[]> images = new ArrayList<>(pendingImages);
+        pendingImages.clear();
+        refreshImagePreview();
+
+        appendUserMessage(text, images);
+        history.add(new ChatMessage("user", text, images));
         promptArea.setText("");
 
         beginAssistantMessage();
@@ -361,7 +429,9 @@ public class ChatPanel {
             // Build the full enriched prompt entirely off the EDT.
             String enriched = ProjectContextBuilder.buildPrompt(
                     text, mode, priorHistory, ideSnapshot, gitSection);
-            snapshot.set(snapshot.size() - 1, new ChatMessage("user", enriched));
+            // Preserve images from the original user message in the enriched entry.
+            ChatMessage original = snapshot.get(snapshot.size() - 1);
+            snapshot.set(snapshot.size() - 1, new ChatMessage("user", enriched, original.images()));
 
             try {
                 new LMStudioClient(endpoint).streamChat(model, snapshot,
@@ -385,9 +455,13 @@ public class ChatPanel {
     // Document helpers — EDT only
     // -------------------------------------------------------------------------
 
-    private void appendUserMessage(String text) {
+    private void appendUserMessage(String text, List<byte[]> images) {
         insert("You\n", userRoleStyle);
-        insert(text + "\n\n", userTextStyle);
+        insert(text + "\n", userTextStyle);
+        if (!images.isEmpty()) {
+            insert("[" + images.size() + " image" + (images.size() > 1 ? "s" : "") + " attached]\n", systemStyle);
+        }
+        insert("\n", userTextStyle);
     }
 
     private void beginAssistantMessage() {
@@ -467,6 +541,101 @@ public class ChatPanel {
         t.setDaemon(true);
         t.start();
     }
+
+    // -------------------------------------------------------------------------
+    // Image attachment helpers
+    // -------------------------------------------------------------------------
+
+    /** Add a raw image byte array to the pending list and refresh the preview. */
+    private void addPendingImage(byte[] imgBytes) {
+        pendingImages.add(imgBytes);
+        refreshImagePreview();
+    }
+
+    /** Rebuild the thumbnail strip from {@code pendingImages}. */
+    private void refreshImagePreview() {
+        imagePreviewPanel.removeAll();
+        for (byte[] img : new ArrayList<>(pendingImages)) {
+            imagePreviewPanel.add(buildThumbnail(img));
+        }
+        imagePreviewPanel.setVisible(!pendingImages.isEmpty());
+        imagePreviewPanel.revalidate();
+        imagePreviewPanel.repaint();
+    }
+
+    /** Build a 64×64 thumbnail panel with a remove (×) button. */
+    private JPanel buildThumbnail(byte[] imgBytes) {
+        JPanel cell = new JPanel(new BorderLayout(0, 0));
+        cell.setPreferredSize(new Dimension(70, 82));
+        cell.setBorder(BorderFactory.createLineBorder(new Color(0x555555), 1));
+
+        try {
+            BufferedImage bi = ImageIO.read(new ByteArrayInputStream(imgBytes));
+            if (bi != null) {
+                Image scaled = bi.getScaledInstance(64, 64, Image.SCALE_SMOOTH);
+                cell.add(new JLabel(new ImageIcon(scaled)), BorderLayout.CENTER);
+            }
+        } catch (Exception ignored) {}
+
+        JButton remove = new JButton("×");
+        remove.setFont(remove.getFont().deriveFont(Font.BOLD, 10f));
+        remove.setPreferredSize(new Dimension(70, 16));
+        remove.setBorderPainted(false);
+        remove.setContentAreaFilled(false);
+        remove.setFocusPainted(false);
+        remove.addActionListener(e -> {
+            pendingImages.remove(imgBytes);
+            refreshImagePreview();
+        });
+        cell.add(remove, BorderLayout.NORTH);
+        return cell;
+    }
+
+    /** Try to paste an image from the system clipboard. Returns true if an image was found. */
+    private boolean tryPasteImageFromClipboard() {
+        try {
+            Transferable t = Toolkit.getDefaultToolkit().getSystemClipboard().getContents(null);
+            if (t == null || !t.isDataFlavorSupported(DataFlavor.imageFlavor)) return false;
+            Image img = (Image) t.getTransferData(DataFlavor.imageFlavor);
+            addPendingImage(toPngBytes(img));
+            return true;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    /** Open a file chooser to pick an image file. */
+    private void chooseImageFile() {
+        JFileChooser fc = new JFileChooser();
+        fc.setDialogTitle("Select Image");
+        fc.setAcceptAllFileFilterUsed(false);
+        fc.addChoosableFileFilter(new javax.swing.filechooser.FileNameExtensionFilter(
+                "Images (PNG, JPG, JPEG, WEBP)", "png", "jpg", "jpeg", "webp"));
+        if (fc.showOpenDialog(root) == JFileChooser.APPROVE_OPTION) {
+            try {
+                addPendingImage(Files.readAllBytes(fc.getSelectedFile().toPath()));
+            } catch (Exception ignored) {}
+        }
+    }
+
+    /** Convert any AWT Image to PNG bytes. */
+    private static byte[] toPngBytes(Image img) throws IOException {
+        BufferedImage bi;
+        if (img instanceof BufferedImage) {
+            bi = (BufferedImage) img;
+        } else {
+            bi = new BufferedImage(
+                    img.getWidth(null), img.getHeight(null), BufferedImage.TYPE_INT_ARGB);
+            Graphics2D g = bi.createGraphics();
+            g.drawImage(img, 0, 0, null);
+            g.dispose();
+        }
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        ImageIO.write(bi, "PNG", out);
+        return out.toByteArray();
+    }
+
+    // -------------------------------------------------------------------------
 
     public JPanel getSwingComponent() {
         return root;
