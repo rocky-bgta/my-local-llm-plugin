@@ -346,7 +346,8 @@ public class ChatPanel {
                     "When in BYPASS mode, ignore file operations and behave like a general assistant.\n" +
                     "Maintain the session context until the user says to discard it.\n" +
                     "If the user asks about the project structure or specific files, use the provided context to answer. " +
-                    "Always refer to the 'Project Structure' section for the complete file hierarchy.";
+                    "Always refer to the 'Current Project Structure' section for the complete file hierarchy. " +
+                    "Do NOT hallucinate or assume any project structure that is not explicitly listed there.";
             
             history.add(new ChatMessage("system", systemInstructions));
 
@@ -391,12 +392,24 @@ public class ChatPanel {
         setLoading(true);
 
         List<ChatMessage> snapshot = new ArrayList<>(history);
-        // Basic history management: if too long, keep system prompt and last 6 messages
-        // Trimming more aggressively to stay within context limits
-        if (snapshot.size() > 8) {
+        // History management: keep system prompt, context messages, and last 10 messages
+        if (snapshot.size() > 15) {
             List<ChatMessage> trimmed = new ArrayList<>();
             trimmed.add(snapshot.get(0)); // Keep system prompt
-            trimmed.addAll(snapshot.subList(snapshot.size() - 7, snapshot.size()));
+            
+            // Keep any context-related messages
+            for (int i = 1; i < snapshot.size() - 10; i++) {
+                ChatMessage m = snapshot.get(i);
+                if (m.content().contains("Project Context")) {
+                    trimmed.add(m);
+                }
+            }
+            
+            // Keep last 10 messages
+            int lastCount = Math.min(10, snapshot.size() - 1);
+            for (int i = snapshot.size() - lastCount; i < snapshot.size(); i++) {
+                trimmed.add(snapshot.get(i));
+            }
             snapshot = trimmed;
         }
 

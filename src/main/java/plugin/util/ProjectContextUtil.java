@@ -16,7 +16,8 @@ public class ProjectContextUtil {
         VirtualFile baseDir = project.getBaseDir();
         if (baseDir == null) return "Project base directory not found.";
 
-        sb.append("Project Structure:\n");
+        sb.append("Current Project Structure:\n");
+        sb.append("Note: Directories like target/, out/, node_modules/ and hidden files are excluded.\n\n");
         appendFileTree(baseDir, "", sb, false, 8000); // Increased limit for structure
 
         if (includeContent) {
@@ -46,35 +47,45 @@ public class ProjectContextUtil {
     private static void appendFileTree(VirtualFile file, String indent, StringBuilder sb, boolean includeContent, int maxChars) {
         if (sb.length() > maxChars) return;
 
-        if (file.getName().startsWith(".") || file.getName().equals("target") || file.getName().equals("out") || file.getName().equals("node_modules")) {
+        String fileName = file.getName();
+        if (fileName.startsWith(".") || fileName.equals("target") || fileName.equals("out") || fileName.equals("node_modules")) {
             return;
         }
 
-        sb.append(indent).append(file.isDirectory() ? "[DIR] " : "[FILE] ").append(file.getName()).append("\n");
-
         if (file.isDirectory()) {
-            for (VirtualFile child : file.getChildren()) {
-                appendFileTree(child, indent + "  ", sb, includeContent, maxChars);
+            if (indent.isEmpty()) {
+                sb.append(fileName).append("/\n");
+            } else {
+                sb.append(indent).append(fileName).append("/\n");
             }
-        } else if (includeContent) {
-            try {
-                // Only include text files and reasonably sized files
-                if (isTextFile(file) && file.getLength() < 50000) {
-                    String content = new String(file.contentsToByteArray(), StandardCharsets.UTF_8);
-                    
-                    int remaining = maxChars - sb.length();
-                    if (remaining <= 0) return;
-                    
-                    if (content.length() > remaining) {
-                        content = content.substring(0, remaining) + "\n... (content truncated)";
-                    }
-
-                    sb.append(indent).append("  --- CONTENT START ---\n");
-                    sb.append(content).append("\n");
-                    sb.append(indent).append("  --- CONTENT END ---\n");
+            VirtualFile[] children = file.getChildren();
+            if (children != null) {
+                for (VirtualFile child : children) {
+                    appendFileTree(child, indent + "  ", sb, includeContent, maxChars);
                 }
-            } catch (IOException e) {
-                sb.append(indent).append("  Error reading file: ").append(e.getMessage()).append("\n");
+            }
+        } else {
+            sb.append(indent).append(fileName).append("\n");
+            if (includeContent) {
+                try {
+                    // Only include text files and reasonably sized files
+                    if (isTextFile(file) && file.getLength() < 50000) {
+                        String content = new String(file.contentsToByteArray(), StandardCharsets.UTF_8);
+                        
+                        int remaining = maxChars - sb.length();
+                        if (remaining <= 0) return;
+                        
+                        if (content.length() > remaining) {
+                            content = content.substring(0, remaining) + "\n... (content truncated)";
+                        }
+
+                        sb.append(indent).append("  --- CONTENT START ---\n");
+                        sb.append(content).append("\n");
+                        sb.append(indent).append("  --- CONTENT END ---\n");
+                    }
+                } catch (IOException e) {
+                    sb.append(indent).append("  Error reading file: ").append(e.getMessage()).append("\n");
+                }
             }
         }
     }
@@ -83,6 +94,7 @@ public class ProjectContextUtil {
         String name = file.getName().toLowerCase();
         return name.endsWith(".java") || name.endsWith(".xml") || name.endsWith(".md") || 
                name.endsWith(".txt") || name.endsWith(".properties") || name.endsWith(".json") ||
-               name.endsWith(".gradle") || name.endsWith(".kts") || name.endsWith(".pom");
+               name.endsWith(".gradle") || name.endsWith(".kts") || name.endsWith(".pom") ||
+               name.endsWith(".yaml") || name.endsWith(".yml");
     }
 }
