@@ -89,10 +89,6 @@ public class ChatPanel {
                 0, 0, 1, 0, UIManager.getColor("Separator.foreground")));
         bar.setPreferredSize(new Dimension(0, 32));
 
-        JLabel title = new JLabel("  Local LLM");
-        title.setFont(new Font(UI_FONT, Font.BOLD, 14));
-        bar.add(title, BorderLayout.WEST);
-
         JButton gearBtn = new JButton(AllIcons.General.Settings);
         gearBtn.setBorderPainted(false);
         gearBtn.setContentAreaFilled(false);
