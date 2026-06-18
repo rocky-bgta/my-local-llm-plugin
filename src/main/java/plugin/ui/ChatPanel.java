@@ -70,9 +70,11 @@ public class ChatPanel {
 
     private JPanel buildToolbar() {
         JPanel bar = new JPanel(new BorderLayout());
-        bar.setBorder(BorderFactory.createMatteBorder(
-                0, 0, 1, 0, UIManager.getColor("Separator.foreground")));
-        bar.setPreferredSize(new Dimension(0, 32));
+        bar.setBorder(BorderFactory.createCompoundBorder(
+                BorderFactory.createMatteBorder(0, 0, 1, 0, UIManager.getColor("Separator.foreground")),
+                BorderFactory.createEmptyBorder(0, 0, 2, 8)
+        ));
+        bar.setPreferredSize(new Dimension(0, 36));
 
         JLabel title = new JLabel("  Local LLM");
         title.setFont(title.getFont().deriveFont(Font.BOLD, 13f));
@@ -338,12 +340,18 @@ public class ChatPanel {
                     "I have provided you with the project structure and file contents below to help you understand the codebase.\n" +
                     "Current Mode: " + mode + "\n" +
                     "When in PLANNING mode, discuss the task and outline the steps. Do not use file operation tags.\n" +
-                    "When in EDITING mode, you can create or modify files/folders. Use the following XML-like tags:\n" +
+                    "When in EDITING mode, you MUST use the following XML operation tags to actually write files to disk. " +
+                    "Do NOT show file content in markdown code blocks — that only displays text and does NOT update any file. " +
+                    "The ONLY way to create or modify a file is to emit the exact XML tag below with the full file content inside it:\n" +
                     "<CREATE_FOLDER path=\"path/to/folder\" />\n" +
-                    "<CREATE_FILE path=\"path/to/file\">content</CREATE_FILE>\n" +
-                    "<MODIFY_FILE path=\"path/to/file\">new content</MODIFY_FILE>\n" +
+                    "<CREATE_FILE path=\"path/to/file\">full file content here</CREATE_FILE>\n" +
+                    "<MODIFY_FILE path=\"path/to/file\">full new file content here</MODIFY_FILE>\n" +
                     "<DELETE_FILE path=\"path/to/file\" />\n" +
                     "<DELETE_FOLDER path=\"path/to/folder\" />\n" +
+                    "Rules for EDITING mode:\n" +
+                    "1. Always emit the XML tag with the complete file content — never truncate or summarize.\n" +
+                    "2. Never wrap the XML tag in a markdown code block (no ```xml fences around the tag itself).\n" +
+                    "3. After the XML tag you may briefly explain what you changed.\n" +
                     "In EDITING mode, you should execute tasks one by one and inform the user of your progress.\n" +
                     "When in BYPASS mode, ignore file operations and behave like a general assistant.\n" +
                     "Maintain the session context until the user says to discard it.\n" +
@@ -428,7 +436,18 @@ public class ChatPanel {
                     history.add(new ChatMessage("assistant", fullResponse));
                     
                     if ("EDITING".equals(mode)) {
-                        FileOperationUtil.processFileOperations(project, fullResponse);
+                        boolean hasOps = fullResponse.contains("<CREATE_FILE") ||
+                                         fullResponse.contains("<MODIFY_FILE") ||
+                                         fullResponse.contains("<CREATE_FOLDER") ||
+                                         fullResponse.contains("<DELETE_FILE") ||
+                                         fullResponse.contains("<DELETE_FOLDER");
+                        if (hasOps) {
+                            FileOperationUtil.processFileOperations(project, fullResponse);
+                            appendSystemMessage("File operations applied.");
+                        } else {
+                            appendSystemMessage("No file operation tags found in the response — no files were changed. " +
+                                    "If you expected a file to be modified, ask again in EDITING mode; the model must use <MODIFY_FILE> tags.");
+                        }
                     } else if ("PLANNING".equals(mode)) {
                         if (fullResponse.contains("<CREATE_FILE") || fullResponse.contains("<MODIFY_FILE") || fullResponse.contains("<CREATE_FOLDER")) {
                             appendSystemMessage("File operations detected but skipped because current mode is PLANNING. Switch to EDITING mode to allow file changes.");

@@ -54,7 +54,7 @@ target/local-llm-assistant.jar
 5. Browse to `target/local-llm-assistant.jar` and click **OK**.
 6. Click **Restart IDE** when prompted.
 
-### Option B — Copy to plugins directory manually
+# Option B — Copy to plugins directory manually
 
 1. Find your IntelliJ plugins directory:
    - Windows: `%APPDATA%\JetBrains\IntelliJIdea2025.2\plugins\`
