@@ -45,27 +45,54 @@ public class ProjectContextUtil {
     }
 
     private static void appendFileTree(VirtualFile file, String indent, StringBuilder sb, boolean includeContent, int maxChars) {
+        appendFileTreeRecursive(file, "", true, sb, includeContent, maxChars);
+    }
+
+    private static void appendFileTreeRecursive(VirtualFile file, String indent, boolean isLast, StringBuilder sb, boolean includeContent, int maxChars) {
         if (sb.length() > maxChars) return;
 
         String fileName = file.getName();
-        if (fileName.startsWith(".") || fileName.equals("target") || fileName.equals("out") || fileName.equals("node_modules")) {
+        // Adjust exclusions: allow .gitignore and target (per user request)
+        if (fileName.startsWith(".") && !fileName.equals(".gitignore")) {
+            return;
+        }
+        if (fileName.equals("out") || fileName.equals("node_modules")) {
             return;
         }
 
+        String prefix = indent.isEmpty() ? "" : (isLast ? "└── " : "├── ");
+        sb.append(indent).append(prefix).append(fileName).append(file.isDirectory() ? "/" : "");
+
+        // Add descriptions for key files
+        String description = getFileDescription(file);
+        if (description != null) {
+            sb.append("         # ").append(description);
+        }
+        sb.append("\n");
+
         if (file.isDirectory()) {
-            if (indent.isEmpty()) {
-                sb.append(fileName).append("/\n");
-            } else {
-                sb.append(indent).append(fileName).append("/\n");
+            // Special case: don't recurse into target/ to keep it clean, but show it exists
+            if (fileName.equals("target")) {
+                return;
             }
+
             VirtualFile[] children = file.getChildren();
             if (children != null) {
+                // Filter children to avoid showing excluded ones in the count
+                List<VirtualFile> filteredChildren = new ArrayList<>();
                 for (VirtualFile child : children) {
-                    appendFileTree(child, indent + "  ", sb, includeContent, maxChars);
+                    String childName = child.getName();
+                    if (childName.startsWith(".") && !childName.equals(".gitignore")) continue;
+                    if (childName.equals("out") || childName.equals("node_modules")) continue;
+                    filteredChildren.add(child);
+                }
+
+                String newIndent = indent + (indent.isEmpty() ? "" : (isLast ? "    " : "│   "));
+                for (int i = 0; i < filteredChildren.size(); i++) {
+                    appendFileTreeRecursive(filteredChildren.get(i), newIndent, i == filteredChildren.size() - 1, sb, includeContent, maxChars);
                 }
             }
         } else {
-            sb.append(indent).append(fileName).append("\n");
             if (includeContent) {
                 try {
                     // Only include text files and reasonably sized files
@@ -73,21 +100,41 @@ public class ProjectContextUtil {
                         String content = new String(file.contentsToByteArray(), StandardCharsets.UTF_8);
                         
                         int remaining = maxChars - sb.length();
-                        if (remaining <= 0) return;
-                        
-                        if (content.length() > remaining) {
-                            content = content.substring(0, remaining) + "\n... (content truncated)";
+                        if (remaining > 0) {
+                            if (content.length() > remaining) {
+                                content = content.substring(0, remaining) + "\n... (content truncated)";
+                            }
+                            String contentIndent = indent + (isLast ? "    " : "│   ");
+                            sb.append(contentIndent).append("  --- CONTENT START ---\n");
+                            // Indent content for readability
+                            for (String line : content.split("\n")) {
+                                sb.append(contentIndent).append("  ").append(line).append("\n");
+                            }
+                            sb.append(contentIndent).append("  --- CONTENT END ---\n");
                         }
-
-                        sb.append(indent).append("  --- CONTENT START ---\n");
-                        sb.append(content).append("\n");
-                        sb.append(indent).append("  --- CONTENT END ---\n");
                     }
                 } catch (IOException e) {
                     sb.append(indent).append("  Error reading file: ").append(e.getMessage()).append("\n");
                 }
             }
         }
+    }
+
+    private static String getFileDescription(VirtualFile file) {
+        String name = file.getName();
+        if (name.equals("pom.xml")) return "Maven project configuration";
+        if (name.equals("README.md")) return "Project documentation";
+        if (name.equals(".gitignore")) return "Git ignore rules";
+        if (name.equals("plugin.xml")) return "Plugin descriptor (ID, actions, extensions)";
+        if (name.equals("ChatPanel.java")) return "Main chat UI panel with streaming output";
+        if (name.equals("ProjectContextUtil.java")) return "Builds project structure context for LLM";
+        if (name.equals("LMStudioClient.java")) return "HTTP client for LLM Studio / Ollama API";
+        if (name.equals("ChatMessage.java")) return "Chat message data model";
+        if (name.equals("PluginSettings.java")) return "Persistent plugin settings (PersistentStateComponent)";
+        if (name.equals("ChatToolWindowFactory.java")) return "Registers the chat tool window in the IDE";
+        if (name.equals("FileOperationUtil.java")) return "File read/write helpers for LLM context";
+        if (name.equals("target")) return "Maven build output (compiled classes + jar)";
+        return null;
     }
 
     private static boolean isTextFile(VirtualFile file) {
