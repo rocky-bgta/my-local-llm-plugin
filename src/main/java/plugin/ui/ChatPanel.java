@@ -23,6 +23,7 @@ import java.io.*;
 import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.function.Consumer;
 
 public class ChatPanel {
 
@@ -32,9 +33,17 @@ public class ChatPanel {
     // Mode selector
     private JComboBox<String> modeCombo;
 
+    // Conversation title (auto-generated from first message)
+    private JLabel  titleLabel;
+    private boolean titleGenerated = false;
+
     // Pending image attachments (cleared after each Send)
     private final List<byte[]> pendingImages    = new ArrayList<>();
     private       JPanel       imagePreviewPanel;
+
+    // Large-prompt chunking thresholds
+    private static final int MAX_SINGLE_PROMPT = 48_000;
+    private static final int CHUNK_SIZE        = 12_000;
 
     // Chat display
     private JTextPane      chatPane;
@@ -88,6 +97,10 @@ public class ChatPanel {
         bar.setBorder(BorderFactory.createMatteBorder(
                 0, 0, 1, 0, UIManager.getColor("Separator.foreground")));
         bar.setPreferredSize(new Dimension(0, 32));
+
+        titleLabel = new JLabel("  New Conversation");
+        titleLabel.setFont(new Font(UI_FONT, Font.PLAIN, 12));
+        bar.add(titleLabel, BorderLayout.WEST);
 
         JButton gearBtn = new JButton(AllIcons.General.Settings);
         gearBtn.setBorderPainted(false);
@@ -350,6 +363,10 @@ public class ChatPanel {
         clearBtn.addActionListener(e -> {
             try { chatDoc.remove(0, chatDoc.getLength()); } catch (BadLocationException ignored) {}
             history.clear();
+            pendingImages.clear();
+            refreshImagePreview();
+            titleGenerated = false;
+            titleLabel.setText("  New Conversation");
         });
 
         // Attach button — opens file chooser for image files
@@ -418,24 +435,31 @@ public class ChatPanel {
         // Mutable snapshot list — the daemon thread will fill in the enriched last entry.
         List<ChatMessage> snapshot = new ArrayList<>(history);
 
+        final String capturedText = text; // effectively final for lambda capture
         daemon(() -> {
             // Phase 2 (daemon): run git commands (blocking I/O, safe off EDT).
-            String gitSection = new GitContextBuilder(project).buildGitSection(text);
+            String gitSection = new GitContextBuilder(project).buildGitSection(capturedText);
 
             // Build the full enriched prompt entirely off the EDT.
             String enriched = ProjectContextBuilder.buildPrompt(
-                    text, mode, priorHistory, ideSnapshot, gitSection);
+                    capturedText, mode, priorHistory, ideSnapshot, gitSection);
             // Preserve images from the original user message in the enriched entry.
             ChatMessage original = snapshot.get(snapshot.size() - 1);
             snapshot.set(snapshot.size() - 1, new ChatMessage("user", enriched, original.images()));
 
+            Consumer<String> onToken = token -> SwingUtilities.invokeLater(() -> appendToken(token));
+
             try {
-                new LMStudioClient(endpoint).streamChat(model, snapshot,
-                        token -> SwingUtilities.invokeLater(() -> appendToken(token)));
+                if (enriched.length() > MAX_SINGLE_PROMPT) {
+                    sendChunked(endpoint, model, snapshot, enriched, original.images(), onToken);
+                } else {
+                    new LMStudioClient(endpoint).streamChat(model, snapshot, onToken);
+                }
                 SwingUtilities.invokeLater(() -> {
                     finalizeAssistantMessage();
                     history.add(new ChatMessage("assistant", assistantBuffer.toString()));
                     setLoading(false);
+                    maybeGenerateTitle(capturedText, endpoint, model);
                 });
             } catch (Exception ex) {
                 SwingUtilities.invokeLater(() -> {
@@ -536,6 +560,85 @@ public class ChatPanel {
         Thread t = new Thread(r);
         t.setDaemon(true);
         t.start();
+    }
+
+    // -------------------------------------------------------------------------
+    // Chunked sending — transparent to the user; no UI indicators shown
+    // -------------------------------------------------------------------------
+
+    /**
+     * Splits {@code enriched} into chunks and sends them sequentially.
+     * Each intermediate chunk requests a silent acknowledgement before the next
+     * is sent. The final chunk streams its response to the user via {@code onToken}.
+     */
+    private void sendChunked(String endpoint, String model,
+                              List<ChatMessage> baseSnapshot, String enriched,
+                              List<byte[]> firstImages, Consumer<String> onToken) throws Exception {
+        List<String> chunks = new ArrayList<>();
+        for (int i = 0; i < enriched.length(); i += CHUNK_SIZE) {
+            chunks.add(enriched.substring(i, Math.min(i + CHUNK_SIZE, enriched.length())));
+        }
+        int total = chunks.size();
+
+        // Work on a fresh conversation list that excludes the oversized enriched entry
+        List<ChatMessage> conv = new ArrayList<>(baseSnapshot.subList(0, baseSnapshot.size() - 1));
+
+        for (int i = 0; i < total; i++) {
+            boolean isLast = (i == total - 1);
+
+            String header = isLast
+                    ? "Part " + (i + 1) + " of " + total + " — FINAL:\n\n"
+                    : "Part " + (i + 1) + " of " + total + ":\n\n";
+            String footer = isLast
+                    ? "\n\nAll context delivered. Please now fulfill the original request."
+                    : "\n\n[Acknowledge with a single 'OK'. More context follows — do not respond yet.]";
+
+            List<byte[]> msgImages = (i == 0) ? firstImages : List.of();
+            conv.add(new ChatMessage("user", header + chunks.get(i) + footer, msgImages));
+
+            if (!isLast) {
+                // Collect ack silently on the daemon thread — nothing shown in the UI
+                StringBuilder ack = new StringBuilder();
+                new LMStudioClient(endpoint).streamChat(model, conv, ack::append);
+                conv.add(new ChatMessage("assistant", ack.toString().trim()));
+            }
+        }
+
+        // Stream the final response to the user
+        new LMStudioClient(endpoint).streamChat(model, conv, onToken);
+    }
+
+    // -------------------------------------------------------------------------
+    // Conversation title auto-generation
+    // -------------------------------------------------------------------------
+
+    /**
+     * Fires a lightweight background LLM call after the first assistant response
+     * to generate a short conversation title. Runs only once per conversation.
+     */
+    private void maybeGenerateTitle(String firstUserText, String endpoint, String model) {
+        if (titleGenerated || model == null || model.isBlank()) return;
+        titleGenerated = true;
+        daemon(() -> {
+            try {
+                String prompt = "Generate a concise coding task title (3-5 words, no quotes, no punctuation). "
+                        + "Return ONLY the title:\n\n"
+                        + firstUserText.substring(0, Math.min(300, firstUserText.length()));
+
+                StringBuilder sb = new StringBuilder();
+                new LMStudioClient(endpoint).streamChat(
+                        model, List.of(new ChatMessage("user", prompt)), sb::append);
+
+                String title = sb.toString().trim()
+                        .replaceAll("(?i)^title:\\s*", "")
+                        .replaceAll("[\"'\n].*", "")   // take first line, strip quotes
+                        .trim();
+
+                if (!title.isBlank() && title.length() <= 60) {
+                    SwingUtilities.invokeLater(() -> titleLabel.setText("  " + title));
+                }
+            } catch (Exception ignored) {}
+        });
     }
 
     // -------------------------------------------------------------------------
