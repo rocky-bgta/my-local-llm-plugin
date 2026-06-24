@@ -54,16 +54,19 @@ public class FileOperationUtil {
         public final String customCommand;
         public final List<String> createdFiles;
         public final List<String> warnings;
+        /** Keys into LLMCorrectionsUtil.RULES for each mistake that was triggered. */
+        public final List<String> mistakeKeys;
 
         public FileOpResult(boolean runTests, boolean checkCompilation, String testName,
                             String customCommand, List<String> createdFiles,
-                            List<String> warnings) {
+                            List<String> warnings, List<String> mistakeKeys) {
             this.runTests = runTests;
             this.checkCompilation = checkCompilation;
             this.testName = testName;
             this.customCommand = customCommand;
             this.createdFiles = createdFiles;
             this.warnings = warnings;
+            this.mistakeKeys = mistakeKeys;
         }
     }
 
@@ -74,6 +77,7 @@ public class FileOperationUtil {
         String customCommand = null;
         List<String> createdFiles = new ArrayList<>();
         List<String> warnings = new ArrayList<>();
+        List<String> mistakeKeys = new ArrayList<>();
 
         // Handle folder creation
         Matcher folderMatcher = FOLDER_OP_PATTERN.matcher(response);
@@ -82,6 +86,7 @@ public class FileOperationUtil {
             String placeholderWarning = detectPlaceholderPath(path);
             if (placeholderWarning != null) {
                 warnings.add(placeholderWarning);
+                mistakeKeys.add("no-placeholder-path");
                 continue;
             }
             createFolder(project, path);
@@ -105,6 +110,7 @@ public class FileOperationUtil {
             String placeholderWarning = detectPlaceholderPath(path);
             if (placeholderWarning != null) {
                 warnings.add(placeholderWarning);
+                mistakeKeys.add("no-placeholder-path");
                 continue;
             }
 
@@ -112,6 +118,7 @@ public class FileOperationUtil {
             String untestableWarning = detectUntestableClass(path);
             if (untestableWarning != null) {
                 warnings.add(untestableWarning);
+                mistakeKeys.add("no-chatpanel-test");
                 continue;
             }
 
@@ -119,6 +126,7 @@ public class FileOperationUtil {
             String correctedPath = autoCorrectTestPath(path, content);
             if (!correctedPath.equals(path)) {
                 warnings.add("⚠ Auto-corrected path: \"" + path + "\" → \"" + correctedPath + "\"");
+                mistakeKeys.add("correct-test-package");
                 path = correctedPath;
             }
 
@@ -126,6 +134,7 @@ public class FileOperationUtil {
             String invalidContentWarning = detectInvalidTestContent(path, content);
             if (invalidContentWarning != null) {
                 warnings.add(invalidContentWarning);
+                mistakeKeys.add("junit5-only");
                 continue;
             }
 
@@ -153,7 +162,7 @@ public class FileOperationUtil {
             customCommand = commandMatcher.group(1);
         }
 
-        return new FileOpResult(runTests, checkCompilation, testName, customCommand, createdFiles, warnings);
+        return new FileOpResult(runTests, checkCompilation, testName, customCommand, createdFiles, warnings, mistakeKeys);
     }
 
     /**

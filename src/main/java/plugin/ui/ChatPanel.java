@@ -401,8 +401,13 @@ public class ChatPanel {
         // Add system message with context if history is empty or it's a new conversation
         if (history.isEmpty()) {
             String context = ProjectContextUtil.getProjectContext(project, s.isIncludeFullContext());
+            String corrections = plugin.util.LLMCorrectionsUtil.loadCorrectionsForPrompt(project.getBasePath());
+            String correctionSection = corrections.isEmpty() ? "" :
+                    "\n\n" + corrections + "\n\n";
+
             String systemInstructions = "You are a specialized AI coding assistant for this project. " +
-                    "I have provided you with the project structure and file contents below to help you understand the codebase.\n" +
+                    "I have provided you with the project structure and file contents below to help you understand the codebase." +
+                    correctionSection +
                     "Current Mode: " + mode + "\n" +
                     "When in PLANNING mode, discuss the task and outline the steps. Do not use file operation tags.\n" +
                     "If you believe the user wants to make changes to files, suggest they switch to EDITING mode.\n" +
@@ -557,15 +562,32 @@ public class ChatPanel {
                     }
 
                     if ("EDITING".equals(mode)) {
+                        String responseLower = fullResponse.toLowerCase();
                         boolean hasFileOps = fullResponse.contains("<CREATE_FILE") ||
                                              fullResponse.contains("<MODIFY_FILE") ||
                                              fullResponse.contains("<CREATE_FOLDER") ||
                                              fullResponse.contains("<DELETE_FILE") ||
                                              fullResponse.contains("<DELETE_FOLDER");
+                        // Detect wrong-case tags (e.g. <modify_file> instead of <MODIFY_FILE>)
+                        boolean hasMalformedTags = !hasFileOps && (
+                                responseLower.contains("<create_file") || responseLower.contains("<modify_file") ||
+                                responseLower.contains("<create_folder") || responseLower.contains("<delete_file") ||
+                                responseLower.contains("<delete_folder"));
                         boolean hasTests = fullResponse.contains("<RUN_TESTS") || fullResponse.contains("<CHECK_COMPILATION");
                         boolean hasCustomCommand = fullResponse.contains("<EXECUTE_COMMAND");
                         
-                        if (hasFileOps || hasTests || hasCustomCommand) {
+                        if (canRetry && hasMalformedTags) {
+                            recordMistakes(java.util.List.of("uppercase-xml-tags"));
+                            appendSystemMessage("⚠ XML tags detected with wrong case — tags must be UPPERCASE (e.g. <MODIFY_FILE>, not <modify_file>). Auto-correcting…");
+                            history.add(new ChatMessage("user",
+                                    "CORRECTION REQUIRED: You used lowercase XML tags. All file operation tags must be UPPERCASE:\n" +
+                                    "<MODIFY_FILE path=\"src/test/java/plugin/ChatMessageTest.java\">complete content</MODIFY_FILE>\n" +
+                                    "<CREATE_FILE path=\"src/test/java/plugin/NewTest.java\">complete content</CREATE_FILE>\n" +
+                                    "Re-send your response using UPPERCASE tags with the complete file content inside."));
+                            beginAssistantMessage();
+                            blinkTimer.start();
+                            streamAndHandle(model, endpoint, null, false);
+                        } else if (hasFileOps || hasTests || hasCustomCommand) {
                             FileOperationUtil.FileOpResult opResult = FileOperationUtil.processFileOperations(project, fullResponse);
                             if (opResult.createdFiles != null) {
                                 newlyCreatedFiles.addAll(opResult.createdFiles);
@@ -574,6 +596,7 @@ public class ChatPanel {
                                 opResult.warnings.forEach(this::appendSystemMessage);
                                 injectBlockedWriteFeedback(opResult.warnings);
                             }
+                            recordMistakes(opResult.mistakeKeys);
                             if (opResult.runTests) {
                                 if (opResult.testName != null) {
                                     appendSystemMessage("Test execution requested for " + opResult.testName + ". Running tests…");
@@ -621,17 +644,20 @@ public class ChatPanel {
                             streamAndHandle(model, endpoint, null, false);
                             return;
                         } else {
+                            recordMistakes(java.util.List.of("use-xml-tags"));
                             appendSystemMessage("No file operation tags found — no files were changed. " +
-                                    "Make sure the model uses <MODIFY_FILE> or <CREATE_FILE> tags.");
-                            if (fullResponse.contains("```")) {
-                                history.add(new ChatMessage("user",
-                                        "REMINDER: You wrote code in a ``` code block — that does NOT write files to disk. " +
-                                        "Use XML tags to write files: " +
-                                        "<MODIFY_FILE path=\"src/test/java/plugin/ChatMessageTest.java\">complete content</MODIFY_FILE>. " +
-                                        "Ask me again and I will re-send using the correct format."));
-                                history.add(new ChatMessage("assistant",
-                                        "Understood. I will use <MODIFY_FILE> XML tags instead of code blocks."));
-                            }
+                                    "A correction has been injected. Please ask again.");
+                            // Always inject — covers plain-text responses AND post-retry failures
+                            history.add(new ChatMessage("user",
+                                    "CORRECTION REQUIRED: Your last response did not write any files to disk. " +
+                                    "In EDITING mode, you MUST output XML file operation tags. " +
+                                    "Neither plain text nor ``` code blocks write to disk. " +
+                                    "Re-send your previous response using the XML format:\n" +
+                                    "<MODIFY_FILE path=\"src/test/java/plugin/ChatMessageTest.java\">complete file content here</MODIFY_FILE>\n" +
+                                    "Use the actual file path from the project structure shown in your context."));
+                            history.add(new ChatMessage("assistant",
+                                    "Understood. I will output the file using <MODIFY_FILE> or <CREATE_FILE> XML tags " +
+                                    "with the complete file content inside."));
                         }
                     } else {
                         // Not in EDITING mode
@@ -647,6 +673,7 @@ public class ChatPanel {
                                 opResult.warnings.forEach(this::appendSystemMessage);
                                 injectBlockedWriteFeedback(opResult.warnings);
                             }
+                            recordMistakes(opResult.mistakeKeys);
                             if (opResult.runTests) {
                                 if (opResult.testName != null) {
                                     appendSystemMessage("Test execution requested for " + opResult.testName + ". Running tests…");
@@ -785,6 +812,8 @@ public class ChatPanel {
         ApplicationManager.getApplication().invokeLater(() ->
             daemon(() -> {
                 BuildUtil.BuildResult result = BuildUtil.runCompile(project);
+                // Scan for source files WHILE still in daemon thread — never on EDT
+                String sourceContext = result.success() ? "" : scanProjectForErrorContext(result.output());
                 SwingUtilities.invokeLater(() -> {
                     if (result.success()) {
                         appendSystemMessage("✓ Build successful.");
@@ -793,12 +822,19 @@ public class ChatPanel {
                         buildFixAttempts++;
                         String errors = result.output();
                         if (errors.length() > 3000) errors = errors.substring(0, 3000) + "\n[...truncated]";
-                        appendSystemMessage("⚠ Build errors — asking LLM to fix (attempt " + buildFixAttempts + "/2)…");
+                        String contextSection = sourceContext.isEmpty() ? "" :
+                                "\n\nRelevant source files from the project " +
+                                "(study these carefully — use ONLY methods and constructors that exist here):\n" +
+                                sourceContext;
+                        appendSystemMessage("⚠ Build errors — scanning project and asking LLM to fix " +
+                                "(attempt " + buildFixAttempts + "/2)…");
                         history.add(new ChatMessage("user",
                                 "The code you just wrote has compile or build errors. Fix ALL errors now.\n" +
-                                "If a dependency is missing, add it to the appropriate configuration file.\n" +
+                                "Read the source files provided below — use ONLY the methods and constructors " +
+                                "that actually exist in those files.\n" +
                                 "Use <MODIFY_FILE> or <CREATE_FILE> XML tags for every file you change.\n\n" +
-                                "Build output:\n" + errors));
+                                "Build output:\n" + errors +
+                                contextSection));
                         beginAssistantMessage();
                         blinkTimer.start();
                         streamAndHandle(model, endpoint, null, false);
@@ -817,30 +853,126 @@ public class ChatPanel {
         ApplicationManager.getApplication().invokeLater(() ->
             daemon(() -> {
                 BuildUtil.BuildResult result = BuildUtil.runTest(project, testName);
+                // Scan for source files WHILE still in daemon thread — never on EDT
+                String sourceContext = result.success() ? "" : scanProjectForErrorContext(result.output());
                 SwingUtilities.invokeLater(() -> {
                     if (result.success()) {
                         appendSystemMessage("✓ Tests passed successfully.");
+                        setLoading(false);
                     } else {
                         appendSystemMessage("❌ Tests failed.");
-                    }
 
-                    if (result.testResults() != null && !result.testResults().isEmpty()) {
-                        StringBuilder table = new StringBuilder("\nTest Results:\n");
-                        table.append(String.format("%-40s | %-10s\n", "Test Name", "Status"));
-                        table.append("-".repeat(41)).append("|").append("-".repeat(11)).append("\n");
-                        for (var tr : result.testResults()) {
-                            table.append(String.format("%-40s | %-10s\n", 
-                                tr.name().length() > 40 ? tr.name().substring(0, 37) + "..." : tr.name(), 
-                                tr.status()));
+                        StringBuilder output = new StringBuilder();
+                        if (result.testResults() != null && !result.testResults().isEmpty()) {
+                            output.append("\nTest Results:\n");
+                            output.append(String.format("%-40s | %-10s\n", "Test Name", "Status"));
+                            output.append("-".repeat(41)).append("|").append("-".repeat(11)).append("\n");
+                            for (var tr : result.testResults()) {
+                                output.append(String.format("%-40s | %-10s\n",
+                                        tr.name().length() > 40 ? tr.name().substring(0, 37) + "..." : tr.name(),
+                                        tr.status()));
+                            }
                         }
-                        appendSystemMessage(table.toString());
-                    } else {
-                        appendSystemMessage(result.output());
+                        String rawOutput = result.output();
+                        if (!rawOutput.isBlank()) output.append("\n").append(rawOutput);
+                        appendSystemMessage(output.toString());
+
+                        if (buildFixAttempts < 2) {
+                            buildFixAttempts++;
+                            String errors = rawOutput.length() > 3000
+                                    ? rawOutput.substring(0, 3000) + "\n[...truncated]" : rawOutput;
+                            String contextSection = sourceContext.isEmpty() ? "" :
+                                    "\n\nRelevant source files from the project " +
+                                    "(use ONLY the methods and constructors that exist here):\n" +
+                                    sourceContext;
+                            appendSystemMessage("⚠ Test failures — scanning project and asking LLM to fix " +
+                                    "(attempt " + buildFixAttempts + "/2)…");
+                            history.add(new ChatMessage("user",
+                                    "The tests you wrote have failures. Fix ALL failing tests now.\n" +
+                                    "Read the source files provided below — use ONLY the methods and " +
+                                    "constructors that actually exist in those files.\n" +
+                                    "Use <MODIFY_FILE> XML tags to fix the test file.\n\n" +
+                                    "Test output:\n" + errors +
+                                    contextSection));
+                            beginAssistantMessage();
+                            blinkTimer.start();
+                            streamAndHandle(model, endpoint, null, false);
+                        } else {
+                            setLoading(false);
+                        }
                     }
-                    setLoading(false);
                 });
             })
         );
+    }
+
+    /**
+     * Scans src/main/java for source files whose class names appear in the error output,
+     * and also includes the failing test file itself. Called off the EDT (daemon thread).
+     */
+    private String scanProjectForErrorContext(String errorOutput) {
+        java.util.Set<String> classNames = new java.util.LinkedHashSet<>();
+
+        // "cannot find symbol: class Foo" → Foo
+        java.util.regex.Matcher symbolMatcher =
+                java.util.regex.Pattern.compile("symbol:\\s+class\\s+(\\w+)").matcher(errorOutput);
+        while (symbolMatcher.find()) classNames.add(symbolMatcher.group(1));
+
+        // "location: class plugin.x.ClassName" or "location: variable x of type plugin.x.ClassName"
+        java.util.regex.Matcher locationMatcher =
+                java.util.regex.Pattern.compile("location:.*?(\\w+)$", java.util.regex.Pattern.MULTILINE)
+                        .matcher(errorOutput);
+        while (locationMatcher.find()) classNames.add(locationMatcher.group(1));
+
+        // "/path/to/FooTest.java:[line,col]" → strip Test suffix to get source class Foo
+        java.util.regex.Matcher testFileMatcher =
+                java.util.regex.Pattern.compile("/(\\w+?)(?:Test)?\\.java:\\[?\\d").matcher(errorOutput);
+        while (testFileMatcher.find()) classNames.add(testFileMatcher.group(1));
+
+        if (classNames.isEmpty()) return "";
+
+        String basePath = project.getBasePath();
+        if (basePath == null) return "";
+
+        StringBuilder context = new StringBuilder();
+
+        // Scan main sources for each class
+        java.nio.file.Path srcMain = java.nio.file.Paths.get(basePath, "src", "main", "java");
+        for (String className : classNames) {
+            try {
+                java.util.Optional<java.nio.file.Path> found = java.nio.file.Files.walk(srcMain)
+                        .filter(p -> p.getFileName().toString().equals(className + ".java"))
+                        .findFirst();
+                if (found.isPresent()) {
+                    String content = java.nio.file.Files.readString(found.get(),
+                            java.nio.charset.StandardCharsets.UTF_8);
+                    context.append("=== ").append(className).append(".java ===\n")
+                           .append(content).append("\n\n");
+                }
+            } catch (Exception ignored) {}
+        }
+
+        // Also include the failing test file so LLM sees what it wrote
+        java.nio.file.Path srcTest = java.nio.file.Paths.get(basePath, "src", "test", "java");
+        java.util.regex.Matcher tf =
+                java.util.regex.Pattern.compile("/(\\w+Test)\\.java").matcher(errorOutput);
+        java.util.Set<String> testFiles = new java.util.LinkedHashSet<>();
+        while (tf.find()) testFiles.add(tf.group(1));
+        for (String testClass : testFiles) {
+            try {
+                java.util.Optional<java.nio.file.Path> found = java.nio.file.Files.walk(srcTest)
+                        .filter(p -> p.getFileName().toString().equals(testClass + ".java"))
+                        .findFirst();
+                if (found.isPresent()) {
+                    String content = java.nio.file.Files.readString(found.get(),
+                            java.nio.charset.StandardCharsets.UTF_8);
+                    context.append("=== ").append(testClass).append(".java (current failing test) ===\n")
+                           .append(content).append("\n\n");
+                }
+            } catch (Exception ignored) {}
+        }
+
+        return context.toString();
     }
 
     private void scheduleGitAdd() {
@@ -959,6 +1091,15 @@ public class ChatPanel {
                 // Last resort: do nothing if even Swing is unavailable
             }
         });
+    }
+
+    private void recordMistakes(java.util.List<String> mistakeKeys) {
+        if (mistakeKeys == null || mistakeKeys.isEmpty()) return;
+        String basePath = project.getBasePath();
+        if (basePath == null) return;
+        for (String key : mistakeKeys) {
+            plugin.util.LLMCorrectionsUtil.recordMistake(basePath, key);
+        }
     }
 
     private void injectBlockedWriteFeedback(java.util.List<String> warnings) {
