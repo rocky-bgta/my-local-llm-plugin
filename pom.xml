@@ -17,6 +17,8 @@
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <!-- Adjust this path if IntelliJ is installed elsewhere -->
         <intellij.lib>C:/Program Files/JetBrains/IntelliJ IDEA 2025.2.5/lib</intellij.lib>
+        <!-- User plugin install dir — override with -Dintellij.plugins.dir=... if needed -->
+        <intellij.plugins.dir>${env.APPDATA}/JetBrains/IntelliJIdea2025.2/plugins</intellij.plugins.dir>
     </properties>
 
     <dependencies>
@@ -164,6 +166,7 @@
     </dependencies>
 
     <build>
+        <finalName>local-llm-assistant</finalName>
         <plugins>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
@@ -181,11 +184,41 @@
                 <artifactId>maven-jar-plugin</artifactId>
                 <version>3.4.2</version>
                 <configuration>
-                    <finalName>local-llm-assistant</finalName>
                     <archive>
                         <addMavenDescriptor>false</addMavenDescriptor>
                     </archive>
                 </configuration>
+            </plugin>
+
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-antrun-plugin</artifactId>
+                <version>3.1.0</version>
+                <executions>
+                    <execution>
+                        <id>install-plugin-to-intellij</id>
+                        <phase>install</phase>
+                        <goals>
+                            <goal>run</goal>
+                        </goals>
+                        <configuration>
+                            <target>
+                                <mkdir dir="${intellij.plugins.dir}/${project.artifactId}/lib"/>
+                                <copy file="${project.build.directory}/${project.build.finalName}.jar"
+                                      todir="${intellij.plugins.dir}/${project.artifactId}/lib"
+                                      overwrite="true"/>
+                                <echo level="info" message=""/>
+                                <echo level="info" message="========================================"/>
+                                <echo level="info" message="  Plugin installed successfully!"/>
+                                <echo level="info" message="  ${project.build.finalName}.jar"/>
+                                <echo level="info" message="  -> ${intellij.plugins.dir}/${project.artifactId}/lib"/>
+                                <echo level="info" message="  Restart IntelliJ IDEA to load the update."/>
+                                <echo level="info" message="========================================"/>
+                                <echo level="info" message=""/>
+                            </target>
+                        </configuration>
+                    </execution>
+                </executions>
             </plugin>
         </plugins>
 
