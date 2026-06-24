@@ -92,11 +92,18 @@ public class FileOperationUtil {
             createFolder(project, path);
         }
 
-        // Handle deletions
+        // Handle deletions — protected canonical test files cannot be deleted
         Matcher deleteMatcher = DELETE_OP_PATTERN.matcher(response);
         while (deleteMatcher.find()) {
             String path = deleteMatcher.group(2).trim();
-            deletePath(project, path);
+            String normalized = path.replace("\\", "/");
+            if (PROTECTED_TEST_FILES.contains(normalized)) {
+                warnings.add("⛔ Blocked deletion of protected test file \"" + normalized + "\". " +
+                             "These canonical test files may not be deleted by the LLM.");
+                mistakeKeys.add("correct-test-package");
+            } else {
+                deletePath(project, path);
+            }
         }
 
         // Handle file creation/modification

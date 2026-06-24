@@ -82,6 +82,15 @@ public class ChatPanel {
         root.add(buildToolbar(),    BorderLayout.NORTH);
         root.add(buildChatArea(),   BorderLayout.CENTER);
         root.add(buildInputPanel(), BorderLayout.SOUTH);
+
+        // Ctrl+Shift+N = New Chat from anywhere in the panel
+        javax.swing.KeyStroke ks = javax.swing.KeyStroke.getKeyStroke(
+                java.awt.event.KeyEvent.VK_N,
+                java.awt.event.InputEvent.CTRL_DOWN_MASK | java.awt.event.InputEvent.SHIFT_DOWN_MASK);
+        root.getInputMap(javax.swing.JComponent.WHEN_ANCESTOR_OF_FOCUSED_COMPONENT).put(ks, "newChat");
+        root.getActionMap().put("newChat", new javax.swing.AbstractAction() {
+            @Override public void actionPerformed(java.awt.event.ActionEvent e) { clearConversation(); }
+        });
     }
 
     public JTextPane getChatPane() { return chatPane; }
@@ -122,19 +131,9 @@ public class ChatPanel {
         modeCombo.setSelectedItem("PLANNING");
         modeCombo.addActionListener(e -> mode = (String) modeCombo.getSelectedItem());
 
-        JButton clearBtn = new JButton("Clear History");
-        clearBtn.setToolTipText("Clear chat history and start a new conversation");
-        clearBtn.addActionListener(e -> {
-            history.clear();
-            chatDoc = new DefaultStyledDocument();
-            initStyles();
-            chatPane.setStyledDocument(chatDoc);
-            appendSystemMessage("Conversation history cleared.");
-            titleGenerated = false;
-            buildFixAttempts = 0;
-            titleLabel.setText("  New Chat");
-            if (tabContent != null) tabContent.setDisplayName("New Chat");
-        });
+        JButton clearBtn = new JButton("New Chat");
+        clearBtn.setToolTipText("Clear chat display and reset conversation context (Ctrl+Shift+N)");
+        clearBtn.addActionListener(e -> clearConversation());
 
         JButton gearBtn = new JButton(AllIcons.General.Settings);
         gearBtn.setBorderPainted(false);
@@ -353,11 +352,9 @@ public class ChatPanel {
             setLoading(false);
         });
 
-        JButton clearBtn = new JButton("Clear");
-        clearBtn.addActionListener(e -> {
-            try { chatDoc.remove(0, chatDoc.getLength()); } catch (BadLocationException ignored) {}
-            history.clear();
-        });
+        JButton clearBtn = new JButton("New Chat");
+        clearBtn.setToolTipText("Clear chat display and reset conversation context (Ctrl+Shift+N)");
+        clearBtn.addActionListener(e -> clearConversation());
 
         spinner = new JProgressBar();
         spinner.setIndeterminate(false);
@@ -408,6 +405,10 @@ public class ChatPanel {
             String systemInstructions = "You are a specialized AI coding assistant for this project. " +
                     "I have provided you with the project structure and file contents below to help you understand the codebase." +
                     correctionSection +
+                    "CRITICAL — PROJECT LANGUAGE: This is a Java 21 Maven project. " +
+                    "You MUST write ALL code in Java. " +
+                    "NEVER generate Go, Python, JavaScript, TypeScript, Kotlin, or any other language. " +
+                    "The build tool is Maven (pom.xml) — never use go build, go test, gradle, npm, or cargo.\n" +
                     "Current Mode: " + mode + "\n" +
                     "When in PLANNING mode, discuss the task and outline the steps. Do not use file operation tags.\n" +
                     "If you believe the user wants to make changes to files, suggest they switch to EDITING mode.\n" +
@@ -441,6 +442,8 @@ public class ChatPanel {
                     "10. Tags can be combined (e.g., CREATE_FILE and then GIT_ADD_NEW).\n" +
                     "Execute tasks one by one and inform the user of your progress.\n" +
                     "JAVA TEST WRITING RULES — follow these whenever you generate or modify a Java test file:\n" +
+                    "0. LANGUAGE: This project is Java 21 Maven. Test files MUST be written in Java using JUnit 5. " +
+                    "NEVER write test code in Go (no 'func Test', no 'testing.T'), Python, or any other language.\n" +
                     "1. READ THE SOURCE FILE FIRST. Before writing any test, read the actual class file to learn its real package, constructor signatures, method names, and return types. Never assume.\n" +
                     "2. ALWAYS include all Java import statements at the top of the test file:\n" +
                     "   - import org.junit.jupiter.api.Test;\n" +
@@ -458,6 +461,11 @@ public class ChatPanel {
                     "7. TEST ONLY WHAT IS TESTABLE. For classes that make network calls (like LocalLLMClient), test construction and that network errors throw exceptions — do not try to assert on live server responses.\n" +
                     "8. CORRECT FILE PATHS FOR TESTS. Java test files MUST go in src/test/java/ mirroring the package. For this project all tests go in src/test/java/plugin/ — for example src/test/java/plugin/ChatMessageTest.java. NEVER use placeholder paths like path/to/file.\n" +
                     "9. CREATE_FILE vs MODIFY_FILE. Use <CREATE_FILE path=\"src/test/java/plugin/FooTest.java\"> for test files that do not yet exist. Use <MODIFY_FILE> only to update a file that already exists.\n" +
+                    "10. PROTECTED TEST FILES. The following test files already exist and are correct — do NOT delete them, do NOT move them, do NOT change their package or class name:\n" +
+                    "    src/test/java/plugin/ChatMessageTest.java\n" +
+                    "    src/test/java/plugin/PluginSettingsTest.java\n" +
+                    "    src/test/java/plugin/LocalLLMClientTest.java\n" +
+                    "    You may only MODIFY their content via <MODIFY_FILE> with valid JUnit 5 content.\n" +
                     "When in BYPASS mode, ignore file operations and behave like a general assistant.\n" +
                     "PLANNING mode is for discussion and outlining steps. File modification tags are ignored in this mode, but test execution and Git operations are allowed.\n" +
                     "EDITING mode is required to write files to disk or perform delete operations.\n" +
@@ -633,12 +641,24 @@ public class ChatPanel {
                             appendSystemMessage("⚠ Model did not use XML tags — auto-correcting…");
                             history.add(new ChatMessage("user",
                                     correction +
-                                    "You MUST re-send your response using the XML tag format:\n" +
-                                    "<MODIFY_FILE path=\"src/test/java/plugin/ChatMessageTest.java\">complete new file content</MODIFY_FILE>\n" +
-                                    "<CREATE_FILE path=\"src/test/java/plugin/NewTest.java\">complete file content</CREATE_FILE>\n" +
-                                    "<RUN_TESTS />\n" +
-                                    "Output the raw XML tag directly with the COMPLETE file content inside it. " +
-                                    "Use the real project path — never use path/to/file."));
+                                    "You MUST re-send your response as a raw XML tag with REAL Java code inside it. " +
+                                    "This project is Java 21 Maven — write Java, not Go, not Python.\n" +
+                                    "Copy this exact structure and fill in your Java code:\n\n" +
+                                    "<MODIFY_FILE path=\"src/test/java/plugin/LocalLLMClientTest.java\">\n" +
+                                    "package plugin;\n\n" +
+                                    "import org.junit.jupiter.api.Test;\n" +
+                                    "import plugin.llm.LocalLLMClient;\n" +
+                                    "import plugin.llm.model.ChatMessage;\n" +
+                                    "import java.util.List;\n" +
+                                    "import static org.junit.jupiter.api.Assertions.*;\n\n" +
+                                    "public class LocalLLMClientTest {\n\n" +
+                                    "    @Test\n" +
+                                    "    void yourTestMethod() {\n" +
+                                    "        // REPLACE THIS with real Java test logic\n" +
+                                    "    }\n" +
+                                    "}\n" +
+                                    "</MODIFY_FILE>\n\n" +
+                                    "Output ONLY the XML tag with complete Java code inside. No ``` fences, no explanation before the tag."));
                             beginAssistantMessage();
                             blinkTimer.start();
                             streamAndHandle(model, endpoint, null, false);
@@ -649,15 +669,29 @@ public class ChatPanel {
                                     "A correction has been injected. Please ask again.");
                             // Always inject — covers plain-text responses AND post-retry failures
                             history.add(new ChatMessage("user",
-                                    "CORRECTION REQUIRED: Your last response did not write any files to disk. " +
-                                    "In EDITING mode, you MUST output XML file operation tags. " +
-                                    "Neither plain text nor ``` code blocks write to disk. " +
-                                    "Re-send your previous response using the XML format:\n" +
-                                    "<MODIFY_FILE path=\"src/test/java/plugin/ChatMessageTest.java\">complete file content here</MODIFY_FILE>\n" +
-                                    "Use the actual file path from the project structure shown in your context."));
+                                    "CORRECTION REQUIRED: Your last response still did not write any files. " +
+                                    "REMINDER — this is a Java 21 Maven project. Write Java only, never Go or Python.\n" +
+                                    "You MUST output a raw XML tag with complete Java code inside it. " +
+                                    "Use this exact structure:\n\n" +
+                                    "<MODIFY_FILE path=\"src/test/java/plugin/LocalLLMClientTest.java\">\n" +
+                                    "package plugin;\n\n" +
+                                    "import org.junit.jupiter.api.Test;\n" +
+                                    "import plugin.llm.LocalLLMClient;\n" +
+                                    "import plugin.llm.model.ChatMessage;\n" +
+                                    "import java.util.List;\n" +
+                                    "import static org.junit.jupiter.api.Assertions.*;\n\n" +
+                                    "public class LocalLLMClientTest {\n\n" +
+                                    "    @Test\n" +
+                                    "    void yourTestMethod() {\n" +
+                                    "        // write your Java test here\n" +
+                                    "    }\n" +
+                                    "}\n" +
+                                    "</MODIFY_FILE>\n\n" +
+                                    "Replace the path and content with what you actually want to write. " +
+                                    "Output ONLY the XML tag — no ``` fences, no explanation before it."));
                             history.add(new ChatMessage("assistant",
-                                    "Understood. I will output the file using <MODIFY_FILE> or <CREATE_FILE> XML tags " +
-                                    "with the complete file content inside."));
+                                    "Understood. I will output only the <MODIFY_FILE> XML tag " +
+                                    "with complete Java code inside it."));
                         }
                     } else {
                         // Not in EDITING mode
@@ -822,18 +856,32 @@ public class ChatPanel {
                         buildFixAttempts++;
                         String errors = result.output();
                         if (errors.length() > 3000) errors = errors.substring(0, 3000) + "\n[...truncated]";
-                        String contextSection = sourceContext.isEmpty() ? "" :
-                                "\n\nRelevant source files from the project " +
-                                "(study these carefully — use ONLY methods and constructors that exist here):\n" +
-                                sourceContext;
+
+                        boolean syntaxError = isSimpleSyntaxError(errors);
+                        String fixInstruction;
+                        String contextLabel;
+                        if (syntaxError) {
+                            fixInstruction =
+                                "The file has a simple syntax error (e.g. missing `}`, `;`, or `)`). " +
+                                "Look at the error line number and the file content below. " +
+                                "Find ONLY the syntax mistake and fix it — do NOT rewrite the logic. " +
+                                "Re-output the COMPLETE corrected file using <MODIFY_FILE>.\n";
+                            contextLabel = "\nCurrent content of the broken file:\n";
+                        } else {
+                            fixInstruction =
+                                "The code has compile errors. Fix ALL errors now. " +
+                                "Use ONLY the methods and constructors shown in the source files below. " +
+                                "Use <MODIFY_FILE> or <CREATE_FILE> XML tags for every file you change.\n";
+                            contextLabel =
+                                "\nRelevant source files (use ONLY these methods and constructors):\n";
+                        }
+                        String contextSection = sourceContext.isEmpty() ? "" : contextLabel + sourceContext;
+
                         appendSystemMessage("⚠ Build errors — scanning project and asking LLM to fix " +
                                 "(attempt " + buildFixAttempts + "/2)…");
                         history.add(new ChatMessage("user",
-                                "The code you just wrote has compile or build errors. Fix ALL errors now.\n" +
-                                "Read the source files provided below — use ONLY the methods and constructors " +
-                                "that actually exist in those files.\n" +
-                                "Use <MODIFY_FILE> or <CREATE_FILE> XML tags for every file you change.\n\n" +
-                                "Build output:\n" + errors +
+                                fixInstruction +
+                                "\nBuild output:\n" + errors +
                                 contextSection));
                         beginAssistantMessage();
                         blinkTimer.start();
@@ -881,18 +929,31 @@ public class ChatPanel {
                             buildFixAttempts++;
                             String errors = rawOutput.length() > 3000
                                     ? rawOutput.substring(0, 3000) + "\n[...truncated]" : rawOutput;
-                            String contextSection = sourceContext.isEmpty() ? "" :
-                                    "\n\nRelevant source files from the project " +
-                                    "(use ONLY the methods and constructors that exist here):\n" +
-                                    sourceContext;
+
+                            boolean syntaxError = isSimpleSyntaxError(errors);
+                            String fixInstruction;
+                            String contextLabel;
+                            if (syntaxError) {
+                                fixInstruction =
+                                    "The test file has a syntax error. Look at the error and the file content. " +
+                                    "Fix ONLY the syntax mistake — do NOT rewrite the logic. " +
+                                    "Re-output the complete corrected file using <MODIFY_FILE>.\n";
+                                contextLabel = "\nCurrent content of the broken file:\n";
+                            } else {
+                                fixInstruction =
+                                    "The tests have failures. Fix the failing assertions now. " +
+                                    "Use ONLY the methods shown in the source files below. " +
+                                    "Use <MODIFY_FILE> XML tags to fix the test file.\n";
+                                contextLabel =
+                                    "\nRelevant source files (use ONLY these methods):\n";
+                            }
+                            String contextSection = sourceContext.isEmpty() ? "" : contextLabel + sourceContext;
+
                             appendSystemMessage("⚠ Test failures — scanning project and asking LLM to fix " +
                                     "(attempt " + buildFixAttempts + "/2)…");
                             history.add(new ChatMessage("user",
-                                    "The tests you wrote have failures. Fix ALL failing tests now.\n" +
-                                    "Read the source files provided below — use ONLY the methods and " +
-                                    "constructors that actually exist in those files.\n" +
-                                    "Use <MODIFY_FILE> XML tags to fix the test file.\n\n" +
-                                    "Test output:\n" + errors +
+                                    fixInstruction +
+                                    "\nTest output:\n" + errors +
                                     contextSection));
                             beginAssistantMessage();
                             blinkTimer.start();
@@ -907,57 +968,88 @@ public class ChatPanel {
     }
 
     /**
+     * Returns true when the error is a simple syntax mistake (missing brace, semicolon, etc.)
+     * that the LLM should fix by patching the file, not by studying the source API.
+     */
+    private static boolean isSimpleSyntaxError(String errorOutput) {
+        String lower = errorOutput.toLowerCase();
+        return lower.contains("reached end of file") ||
+               lower.contains("';' expected")         ||
+               lower.contains("'(' expected")         ||
+               lower.contains("')' expected")         ||
+               lower.contains("'{' expected")         ||
+               lower.contains("'}' expected")         ||
+               lower.contains("illegal start of expression") ||
+               lower.contains("class, interface, or enum expected") ||
+               lower.contains("not a statement");
+    }
+
+    /**
      * Scans src/main/java for source files whose class names appear in the error output,
-     * and also includes the failing test file itself. Called off the EDT (daemon thread).
+     * and ALWAYS includes the failing test file itself.
+     * Called off the EDT (daemon thread only).
      */
     private String scanProjectForErrorContext(String errorOutput) {
+        // Normalise separators — Maven on Windows can emit either \ or /
+        String normalised = errorOutput.replace("\\", "/");
+
         java.util.Set<String> classNames = new java.util.LinkedHashSet<>();
 
         // "cannot find symbol: class Foo" → Foo
         java.util.regex.Matcher symbolMatcher =
-                java.util.regex.Pattern.compile("symbol:\\s+class\\s+(\\w+)").matcher(errorOutput);
+                java.util.regex.Pattern.compile("symbol:\\s+class\\s+(\\w+)").matcher(normalised);
         while (symbolMatcher.find()) classNames.add(symbolMatcher.group(1));
 
-        // "location: class plugin.x.ClassName" or "location: variable x of type plugin.x.ClassName"
+        // "location: class plugin.x.ClassName" → ClassName
         java.util.regex.Matcher locationMatcher =
                 java.util.regex.Pattern.compile("location:.*?(\\w+)$", java.util.regex.Pattern.MULTILINE)
-                        .matcher(errorOutput);
+                        .matcher(normalised);
         while (locationMatcher.find()) classNames.add(locationMatcher.group(1));
 
-        // "/path/to/FooTest.java:[line,col]" → strip Test suffix to get source class Foo
-        java.util.regex.Matcher testFileMatcher =
-                java.util.regex.Pattern.compile("/(\\w+?)(?:Test)?\\.java:\\[?\\d").matcher(errorOutput);
-        while (testFileMatcher.find()) classNames.add(testFileMatcher.group(1));
-
-        if (classNames.isEmpty()) return "";
+        // "/path/FooTest.java:[line,col]" → strip optional Test suffix → source class Foo
+        java.util.regex.Matcher fileInErrorMatcher =
+                java.util.regex.Pattern.compile("/(\\w+?)(?:Test)?\\.java:\\[?\\d").matcher(normalised);
+        while (fileInErrorMatcher.find()) classNames.add(fileInErrorMatcher.group(1));
 
         String basePath = project.getBasePath();
         if (basePath == null) return "";
 
         StringBuilder context = new StringBuilder();
 
-        // Scan main sources for each class
-        java.nio.file.Path srcMain = java.nio.file.Paths.get(basePath, "src", "main", "java");
-        for (String className : classNames) {
+        // For API/semantic errors: scan main sources
+        if (!classNames.isEmpty()) {
+            java.nio.file.Path srcMain = java.nio.file.Paths.get(basePath, "src", "main", "java");
+            for (String className : classNames) {
+                try {
+                    java.util.Optional<java.nio.file.Path> found = java.nio.file.Files.walk(srcMain)
+                            .filter(p -> p.getFileName().toString().equals(className + ".java"))
+                            .findFirst();
+                    if (found.isPresent()) {
+                        String content = java.nio.file.Files.readString(found.get(),
+                                java.nio.charset.StandardCharsets.UTF_8);
+                        context.append("=== ").append(className).append(".java ===\n")
+                               .append(content).append("\n\n");
+                    }
+                } catch (Exception ignored) {}
+            }
+        }
+
+        // ALWAYS include the failing test file — this is critical for syntax error fixes
+        java.nio.file.Path srcTest = java.nio.file.Paths.get(basePath, "src", "test", "java");
+        java.util.regex.Matcher tf =
+                java.util.regex.Pattern.compile("/(\\w+Test)\\.java").matcher(normalised);
+        java.util.Set<String> testFiles = new java.util.LinkedHashSet<>();
+        while (tf.find()) testFiles.add(tf.group(1));
+
+        // Fallback: if no test file found in error text, scan the whole test tree
+        if (testFiles.isEmpty()) {
             try {
-                java.util.Optional<java.nio.file.Path> found = java.nio.file.Files.walk(srcMain)
-                        .filter(p -> p.getFileName().toString().equals(className + ".java"))
-                        .findFirst();
-                if (found.isPresent()) {
-                    String content = java.nio.file.Files.readString(found.get(),
-                            java.nio.charset.StandardCharsets.UTF_8);
-                    context.append("=== ").append(className).append(".java ===\n")
-                           .append(content).append("\n\n");
-                }
+                java.nio.file.Files.walk(srcTest)
+                        .filter(p -> p.getFileName().toString().endsWith("Test.java"))
+                        .forEach(p -> testFiles.add(p.getFileName().toString().replace(".java", "")));
             } catch (Exception ignored) {}
         }
 
-        // Also include the failing test file so LLM sees what it wrote
-        java.nio.file.Path srcTest = java.nio.file.Paths.get(basePath, "src", "test", "java");
-        java.util.regex.Matcher tf =
-                java.util.regex.Pattern.compile("/(\\w+Test)\\.java").matcher(errorOutput);
-        java.util.Set<String> testFiles = new java.util.LinkedHashSet<>();
-        while (tf.find()) testFiles.add(tf.group(1));
         for (String testClass : testFiles) {
             try {
                 java.util.Optional<java.nio.file.Path> found = java.nio.file.Files.walk(srcTest)
@@ -966,7 +1058,7 @@ public class ChatPanel {
                 if (found.isPresent()) {
                     String content = java.nio.file.Files.readString(found.get(),
                             java.nio.charset.StandardCharsets.UTF_8);
-                    context.append("=== ").append(testClass).append(".java (current failing test) ===\n")
+                    context.append("=== ").append(testClass).append(".java (current content — fix this file) ===\n")
                            .append(content).append("\n\n");
                 }
             } catch (Exception ignored) {}
@@ -1091,6 +1183,20 @@ public class ChatPanel {
                 // Last resort: do nothing if even Swing is unavailable
             }
         });
+    }
+
+    private void clearConversation() {
+        history.clear();
+        newlyCreatedFiles.clear();
+        chatDoc = new DefaultStyledDocument();
+        initStyles();
+        chatPane.setStyledDocument(chatDoc);
+        titleGenerated = false;
+        buildFixAttempts = 0;
+        titleLabel.setText("  New Chat");
+        if (tabContent != null) tabContent.setDisplayName("New Chat");
+        appendSystemMessage("Chat cleared. New conversation started.");
+        promptArea.requestFocusInWindow();
     }
 
     private void recordMistakes(java.util.List<String> mistakeKeys) {
