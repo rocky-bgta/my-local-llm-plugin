@@ -597,8 +597,10 @@ public class ChatPanel {
                                 scheduleGitAdd();
                             }
                             return;
-                        } else if (canRetry && isFileOpIntent(userText)) {
-                            // Model either used a code block or gave plain text — auto-correct once
+                        } else if (canRetry && (isFileOpIntent(userText) || fullResponse.contains("```"))) {
+                            // Model either used a code block or gave plain text — auto-correct once.
+                            // Trigger also when LLM responded with code blocks regardless of user phrasing
+                            // (e.g. user said "yes" or "add test case" and LLM replied with markdown).
                             boolean usedCodeBlock = fullResponse.contains("```");
                             String correction = usedCodeBlock
                                 ? "CORRECTION REQUIRED: You responded with file content inside a ``` code block. " +
@@ -609,17 +611,27 @@ public class ChatPanel {
                             history.add(new ChatMessage("user",
                                     correction +
                                     "You MUST re-send your response using the XML tag format:\n" +
-                                    "<MODIFY_FILE path=\"path/to/file\">complete new file content</MODIFY_FILE>\n" +
-                                    "<CREATE_FILE path=\"path/to/file\">complete file content</CREATE_FILE>\n" +
+                                    "<MODIFY_FILE path=\"src/test/java/plugin/ChatMessageTest.java\">complete new file content</MODIFY_FILE>\n" +
+                                    "<CREATE_FILE path=\"src/test/java/plugin/NewTest.java\">complete file content</CREATE_FILE>\n" +
                                     "<RUN_TESTS />\n" +
-                                    "Output the raw XML tag directly with the full file content inside it."));
+                                    "Output the raw XML tag directly with the COMPLETE file content inside it. " +
+                                    "Use the real project path — never use path/to/file."));
                             beginAssistantMessage();
                             blinkTimer.start();
                             streamAndHandle(model, endpoint, null, false);
                             return;
                         } else {
                             appendSystemMessage("No file operation tags found — no files were changed. " +
-                                    "Make sure the model uses <MODIFY_FILE> tags.");
+                                    "Make sure the model uses <MODIFY_FILE> or <CREATE_FILE> tags.");
+                            if (fullResponse.contains("```")) {
+                                history.add(new ChatMessage("user",
+                                        "REMINDER: You wrote code in a ``` code block — that does NOT write files to disk. " +
+                                        "Use XML tags to write files: " +
+                                        "<MODIFY_FILE path=\"src/test/java/plugin/ChatMessageTest.java\">complete content</MODIFY_FILE>. " +
+                                        "Ask me again and I will re-send using the correct format."));
+                                history.add(new ChatMessage("assistant",
+                                        "Understood. I will use <MODIFY_FILE> XML tags instead of code blocks."));
+                            }
                         }
                     } else {
                         // Not in EDITING mode
@@ -873,8 +885,10 @@ public class ChatPanel {
                lower.contains("create") || lower.contains("delete") || lower.contains("change") ||
                lower.contains("write") || lower.contains("fix") || lower.contains("remove") ||
                lower.contains("rename") || lower.contains("replace") || lower.contains("refactor") ||
+               lower.contains("implement") ||
                lower.contains("run test") || lower.contains("execute test") || lower.contains("check test") ||
-               lower.contains("implement") || lower.contains("add") && (lower.contains("file") || lower.contains("class") || lower.contains("method"));
+               lower.contains("add test") || lower.contains("missing test") || lower.contains("test case") ||
+               (lower.contains("add") && (lower.contains("file") || lower.contains("class") || lower.contains("method")));
     }
 
     public void setTabContent(Content content) {
