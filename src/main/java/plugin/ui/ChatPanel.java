@@ -411,13 +411,13 @@ public class ChatPanel {
                     "WRONG — this will NOT write the file (do not do this):\n" +
                     "```markdown\n...file content...\n```\n" +
                     "CORRECT — this WILL write the file (always do this instead):\n" +
-                    "<MODIFY_FILE path=\"path/to/file\">complete new file content here</MODIFY_FILE>\n" +
-                    "All available tags:\n" +
-                    "<MODIFY_FILE path=\"path/to/file\">complete new file content</MODIFY_FILE>\n" +
-                    "<CREATE_FILE path=\"path/to/file\">complete file content</CREATE_FILE>\n" +
-                    "<CREATE_FOLDER path=\"path/to/folder\" />\n" +
-                    "<DELETE_FILE path=\"path/to/file\" />\n" +
-                    "<DELETE_FOLDER path=\"path/to/folder\" />\n" +
+                    "<MODIFY_FILE path=\"src/main/java/plugin/ui/ChatPanel.java\">complete new file content here</MODIFY_FILE>\n" +
+                    "All available tags (use real project paths — NEVER use path/to/file or other placeholders):\n" +
+                    "<MODIFY_FILE path=\"src/main/java/plugin/ui/ChatPanel.java\">complete new file content</MODIFY_FILE>\n" +
+                    "<CREATE_FILE path=\"src/test/java/plugin/ChatMessageTest.java\">complete file content</CREATE_FILE>\n" +
+                    "<CREATE_FOLDER path=\"src/main/java/plugin/newpackage\" />\n" +
+                    "<DELETE_FILE path=\"src/test/java/plugin/OldTest.java\" />\n" +
+                    "<DELETE_FOLDER path=\"src/main/java/plugin/oldpackage\" />\n" +
                     "<RUN_TESTS />\n" +
                     "<RUN_TESTS test=\"ClassName\" />\n" +
                     "<CHECK_COMPILATION />\n" +
@@ -429,12 +429,30 @@ public class ChatPanel {
                     "3. You may add a brief explanation AFTER the closing XML tag.\n" +
                     "4. If you use a ``` code block for file content, the file will NOT be changed.\n" +
                     "5. To run all project tests, use the <RUN_TESTS /> tag.\n" +
-                    "6. To run a specific test case, use <RUN_TESTS test=\"ClassName\" /> (e.g., <RUN_TESTS test=\"ChatPanelTest\" />).\n" +
+                    "6. To run a specific test case, use <RUN_TESTS test=\"ClassName\" /> (e.g., <RUN_TESTS test=\"ChatMessageTest\" />).\n" +
                     "7. To check if the project compiles without running tests, use <CHECK_COMPILATION />. This will automatically detect the build system (Maven, Gradle, Go, etc.) and run the appropriate command.\n" +
                     "8. For non-Java projects or if auto-detection fails, use <EXECUTE_COMMAND command=\"...\" /> to run build or test commands (e.g., <EXECUTE_COMMAND command=\"go build\" />).\n" +
                     "9. To add ALL newly created files from the current task to Git, use <GIT_ADD_NEW />.\n" +
                     "10. Tags can be combined (e.g., CREATE_FILE and then GIT_ADD_NEW).\n" +
                     "Execute tasks one by one and inform the user of your progress.\n" +
+                    "JAVA TEST WRITING RULES — follow these whenever you generate or modify a Java test file:\n" +
+                    "1. READ THE SOURCE FILE FIRST. Before writing any test, read the actual class file to learn its real package, constructor signatures, method names, and return types. Never assume.\n" +
+                    "2. ALWAYS include all Java import statements at the top of the test file:\n" +
+                    "   - import org.junit.jupiter.api.Test;\n" +
+                    "   - import org.junit.jupiter.api.BeforeEach; (if used)\n" +
+                    "   - import static org.junit.jupiter.api.Assertions.*;\n" +
+                    "   - import <exact.package.ClassName>; for every class used in the test\n" +
+                    "   - import java.util.List; / import java.util.Map; etc. for any JDK type used\n" +
+                    "3. USE THE REAL CONSTRUCTOR. If the constructor requires arguments (e.g. LocalLLMClient(String baseUrl)), pass them. Never call new LocalLLMClient() if no no-arg constructor exists.\n" +
+                    "4. USE REAL METHOD NAMES. Only call methods that actually exist on the class. Do not invent methods like getSetting(String key) or sendMessage(ChatMessage). Verify by reading the source file.\n" +
+                    "5. RECORD FIELD ORDER. Java records expose fields in declaration order. ChatMessage is defined as record ChatMessage(String role, String content) — so new ChatMessage(\"user\", \"Hello\") is correct; new ChatMessage(\"Hello\", \"user\") is WRONG.\n" +
+                    "6. DO NOT UNIT TEST IntelliJ PLATFORM CLASSES. plugin.ui.ChatPanel requires a live com.intellij.openapi.project.Project instance and cannot be unit-tested outside the IDE. The same applies to any class in plugin.ui or plugin.toolwindow. Testable classes are: plugin.llm.model.ChatMessage, plugin.settings.PluginSettings, plugin.llm.LocalLLMClient.\n" +
+                    "   If you are asked to FIX compilation errors in ChatPanelTest or any other IntelliJ-platform-dependent test file, do NOT attempt to fix the errors — they are unfixable without a running IDE. Instead:\n" +
+                    "   a) Delete the broken file: <DELETE_FILE path=\"src/test/java/plugin/ui/ChatPanelTest.java\" />\n" +
+                    "   b) Then write correct tests for a testable class (ChatMessage, PluginSettings, or LocalLLMClient) using <CREATE_FILE path=\"src/test/java/plugin/FooTest.java\">.\n" +
+                    "7. TEST ONLY WHAT IS TESTABLE. For classes that make network calls (like LocalLLMClient), test construction and that network errors throw exceptions — do not try to assert on live server responses.\n" +
+                    "8. CORRECT FILE PATHS FOR TESTS. Java test files MUST go in src/test/java/ mirroring the package. For this project all tests go in src/test/java/plugin/ — for example src/test/java/plugin/ChatMessageTest.java. NEVER use placeholder paths like path/to/file.\n" +
+                    "9. CREATE_FILE vs MODIFY_FILE. Use <CREATE_FILE path=\"src/test/java/plugin/FooTest.java\"> for test files that do not yet exist. Use <MODIFY_FILE> only to update a file that already exists.\n" +
                     "When in BYPASS mode, ignore file operations and behave like a general assistant.\n" +
                     "PLANNING mode is for discussion and outlining steps. File modification tags are ignored in this mode, but test execution and Git operations are allowed.\n" +
                     "EDITING mode is required to write files to disk or perform delete operations.\n" +
@@ -552,6 +570,10 @@ public class ChatPanel {
                             if (opResult.createdFiles != null) {
                                 newlyCreatedFiles.addAll(opResult.createdFiles);
                             }
+                            if (opResult.warnings != null && !opResult.warnings.isEmpty()) {
+                                opResult.warnings.forEach(this::appendSystemMessage);
+                                injectBlockedWriteFeedback(opResult.warnings);
+                            }
                             if (opResult.runTests) {
                                 if (opResult.testName != null) {
                                     appendSystemMessage("Test execution requested for " + opResult.testName + ". Running tests…");
@@ -609,6 +631,10 @@ public class ChatPanel {
 
                         if (fullResponse.contains("<RUN_TESTS") || fullResponse.contains("<CHECK_COMPILATION") || fullResponse.contains("<EXECUTE_COMMAND")) {
                             FileOperationUtil.FileOpResult opResult = FileOperationUtil.processFileOperations(project, fullResponse);
+                            if (opResult.warnings != null && !opResult.warnings.isEmpty()) {
+                                opResult.warnings.forEach(this::appendSystemMessage);
+                                injectBlockedWriteFeedback(opResult.warnings);
+                            }
                             if (opResult.runTests) {
                                 if (opResult.testName != null) {
                                     appendSystemMessage("Test execution requested for " + opResult.testName + ". Running tests…");
@@ -919,6 +945,27 @@ public class ChatPanel {
                 // Last resort: do nothing if even Swing is unavailable
             }
         });
+    }
+
+    private void injectBlockedWriteFeedback(java.util.List<String> warnings) {
+        java.util.List<String> blocked = warnings.stream()
+                .filter(w -> w.startsWith("⛔"))
+                .collect(java.util.stream.Collectors.toList());
+        if (blocked.isEmpty()) return;
+        String feedback = "SYSTEM FEEDBACK — The following file operations were rejected:\n" +
+                String.join("\n", blocked) + "\n\n" +
+                "REQUIRED ACTIONS:\n" +
+                "1. If the rejected file exists on disk with errors, delete it immediately using the XML tag: " +
+                "<DELETE_FILE path=\"src/test/java/plugin/ui/ChatPanelTest.java\" /> " +
+                "(adjust the path to match the actual file).\n" +
+                "2. Do NOT attempt to write or fix that file again.\n" +
+                "3. The ONLY unit-testable classes in this project are: " +
+                "plugin.llm.model.ChatMessage, plugin.settings.PluginSettings, plugin.llm.LocalLLMClient.\n" +
+                "4. Write tests only for those three classes using <CREATE_FILE path=\"src/test/java/plugin/FooTest.java\">.";
+        history.add(new ChatMessage("user", feedback));
+        history.add(new ChatMessage("assistant",
+                "Understood. I will delete the untestable test file and write correct tests " +
+                "only for ChatMessage, PluginSettings, or LocalLLMClient."));
     }
 
     private static void daemon(Runnable r) {
