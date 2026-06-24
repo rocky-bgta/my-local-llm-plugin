@@ -12,13 +12,31 @@
     <name>Local LLM Assistant</name>
 
     <properties>
-        <maven.compiler.source>21</maven.compiler.source>
-        <maven.compiler.target>21</maven.compiler.target>
+        <!-- ── Java ─────────────────────────────────────────────────────── -->
+        <java.version>21</java.version>
+        <maven.compiler.source>${java.version}</maven.compiler.source>
+        <maven.compiler.target>${java.version}</maven.compiler.target>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-        <!-- Adjust this path if IntelliJ is installed elsewhere -->
-        <intellij.lib>C:/Program Files/JetBrains/IntelliJ IDEA 2025.2.5/lib</intellij.lib>
-        <!-- User plugin install dir — override with -Dintellij.plugins.dir=... if needed -->
-        <intellij.plugins.dir>${env.APPDATA}/JetBrains/IntelliJIdea2025.2/plugins</intellij.plugins.dir>
+
+        <!-- ── IntelliJ Platform ─────────────────────────────────────────
+             To upgrade: change intellij.version + intellij.version.full only.
+             All paths, dependency versions, and plugin dir are derived.      -->
+        <intellij.version>2025.2</intellij.version>
+        <intellij.version.full>2025.2.5</intellij.version.full>
+        <intellij.install.dir>C:/Program Files/JetBrains/IntelliJ IDEA ${intellij.version.full}</intellij.install.dir>
+        <intellij.lib>${intellij.install.dir}/lib</intellij.lib>
+        <intellij.config.dir>IntelliJIdea${intellij.version}</intellij.config.dir>
+        <intellij.plugins.dir>${env.APPDATA}/JetBrains/${intellij.config.dir}/plugins</intellij.plugins.dir>
+        <intellij.plugin.install.dir>${intellij.plugins.dir}/${project.artifactId}/lib</intellij.plugin.install.dir>
+
+        <!-- ── Test dependency versions ─────────────────────────────────── -->
+        <junit.version>5.10.2</junit.version>
+        <mockito.version>5.11.0</mockito.version>
+
+        <!-- ── Maven plugin versions ─────────────────────────────────────── -->
+        <maven.compiler.plugin.version>3.13.0</maven.compiler.plugin.version>
+        <maven.jar.plugin.version>3.4.2</maven.jar.plugin.version>
+        <maven.antrun.plugin.version>3.1.0</maven.antrun.plugin.version>
     </properties>
 
     <dependencies>
@@ -29,98 +47,98 @@
         <dependency>
             <groupId>com.intellij</groupId>
             <artifactId>app</artifactId>
-            <version>2025.2</version>
+            <version>${intellij.version}</version>
             <scope>system</scope>
             <systemPath>${intellij.lib}/app.jar</systemPath>
         </dependency>
         <dependency>
             <groupId>com.intellij</groupId>
             <artifactId>util</artifactId>
-            <version>2025.2</version>
+            <version>${intellij.version}</version>
             <scope>system</scope>
             <systemPath>${intellij.lib}/util.jar</systemPath>
         </dependency>
         <dependency>
             <groupId>com.intellij</groupId>
             <artifactId>util-8</artifactId>
-            <version>2025.2</version>
+            <version>${intellij.version}</version>
             <scope>system</scope>
             <systemPath>${intellij.lib}/util-8.jar</systemPath>
         </dependency>
         <dependency>
             <groupId>com.intellij</groupId>
             <artifactId>util_rt</artifactId>
-            <version>2025.2</version>
+            <version>${intellij.version}</version>
             <scope>system</scope>
             <systemPath>${intellij.lib}/util_rt.jar</systemPath>
         </dependency>
         <dependency>
             <groupId>com.intellij</groupId>
             <artifactId>annotations</artifactId>
-            <version>2025.2</version>
+            <version>${intellij.version}</version>
             <scope>system</scope>
             <systemPath>${intellij.lib}/annotations.jar</systemPath>
         </dependency>
         <dependency>
             <groupId>com.intellij</groupId>
             <artifactId>lib</artifactId>
-            <version>2025.2</version>
+            <version>${intellij.version}</version>
             <scope>system</scope>
             <systemPath>${intellij.lib}/lib.jar</systemPath>
         </dependency>
         <dependency>
             <groupId>com.intellij.platform</groupId>
             <artifactId>core</artifactId>
-            <version>2025.2</version>
+            <version>${intellij.version}</version>
             <scope>system</scope>
             <systemPath>${intellij.lib}/intellij.platform.core.jar</systemPath>
         </dependency>
         <dependency>
             <groupId>com.intellij.platform</groupId>
             <artifactId>core-impl</artifactId>
-            <version>2025.2</version>
+            <version>${intellij.version}</version>
             <scope>system</scope>
             <systemPath>${intellij.lib}/intellij.platform.core.impl.jar</systemPath>
         </dependency>
         <dependency>
             <groupId>com.intellij.platform</groupId>
             <artifactId>core-ui</artifactId>
-            <version>2025.2</version>
+            <version>${intellij.version}</version>
             <scope>system</scope>
             <systemPath>${intellij.lib}/intellij.platform.core.ui.jar</systemPath>
         </dependency>
         <dependency>
             <groupId>com.intellij.platform</groupId>
             <artifactId>ide</artifactId>
-            <version>2025.2</version>
+            <version>${intellij.version}</version>
             <scope>system</scope>
             <systemPath>${intellij.lib}/intellij.platform.ide.jar</systemPath>
         </dependency>
         <dependency>
             <groupId>com.intellij.platform</groupId>
             <artifactId>ide-core</artifactId>
-            <version>2025.2</version>
+            <version>${intellij.version}</version>
             <scope>system</scope>
             <systemPath>${intellij.lib}/intellij.platform.ide.core.jar</systemPath>
         </dependency>
         <dependency>
             <groupId>com.intellij.platform</groupId>
             <artifactId>ide-impl</artifactId>
-            <version>2025.2</version>
+            <version>${intellij.version}</version>
             <scope>system</scope>
             <systemPath>${intellij.lib}/intellij.platform.ide.impl.jar</systemPath>
         </dependency>
         <dependency>
             <groupId>com.intellij.platform</groupId>
             <artifactId>projectModel</artifactId>
-            <version>2025.2</version>
+            <version>${intellij.version}</version>
             <scope>system</scope>
             <systemPath>${intellij.lib}/intellij.platform.projectModel.jar</systemPath>
         </dependency>
         <dependency>
             <groupId>com.intellij.platform</groupId>
             <artifactId>analysis</artifactId>
-            <version>2025.2</version>
+            <version>${intellij.version}</version>
             <scope>system</scope>
             <systemPath>${intellij.lib}/intellij.platform.analysis.jar</systemPath>
         </dependency>
@@ -129,7 +147,7 @@
         <dependency>
             <groupId>com.intellij.platform</groupId>
             <artifactId>util-ui</artifactId>
-            <version>2025.2</version>
+            <version>${intellij.version}</version>
             <scope>system</scope>
             <systemPath>${intellij.lib}/intellij.platform.util.ui.jar</systemPath>
         </dependency>
@@ -138,51 +156,53 @@
         <dependency>
             <groupId>com.intellij.bundled</groupId>
             <artifactId>gson</artifactId>
-            <version>bundled</version>
+            <version>${intellij.version}</version>
             <scope>system</scope>
             <systemPath>${intellij.lib}/intellij.libraries.gson.jar</systemPath>
         </dependency>
 
-        <!-- Testing Dependencies -->
+        <!-- ── Test dependencies ─────────────────────────────────────────── -->
         <dependency>
             <groupId>org.junit.jupiter</groupId>
             <artifactId>junit-jupiter-api</artifactId>
-            <version>5.10.2</version>
+            <version>${junit.version}</version>
             <scope>test</scope>
         </dependency>
         <dependency>
             <groupId>org.junit.jupiter</groupId>
             <artifactId>junit-jupiter-engine</artifactId>
-            <version>5.10.2</version>
+            <version>${junit.version}</version>
             <scope>test</scope>
         </dependency>
         <dependency>
             <groupId>org.mockito</groupId>
             <artifactId>mockito-core</artifactId>
-            <version>5.11.0</version>
+            <version>${mockito.version}</version>
             <scope>test</scope>
         </dependency>
 
     </dependencies>
 
     <build>
-        <finalName>local-llm-assistant</finalName>
+        <!-- Derived from artifactId — stays in sync automatically -->
+        <finalName>${project.artifactId}</finalName>
+
         <plugins>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-compiler-plugin</artifactId>
-                <version>3.13.0</version>
+                <version>${maven.compiler.plugin.version}</version>
                 <configuration>
-                    <source>21</source>
-                    <target>21</target>
-                    <encoding>UTF-8</encoding>
+                    <source>${java.version}</source>
+                    <target>${java.version}</target>
+                    <encoding>${project.build.sourceEncoding}</encoding>
                 </configuration>
             </plugin>
 
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-jar-plugin</artifactId>
-                <version>3.4.2</version>
+                <version>${maven.jar.plugin.version}</version>
                 <configuration>
                     <archive>
                         <addMavenDescriptor>false</addMavenDescriptor>
@@ -193,7 +213,7 @@
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-antrun-plugin</artifactId>
-                <version>3.1.0</version>
+                <version>${maven.antrun.plugin.version}</version>
                 <executions>
                     <execution>
                         <id>install-plugin-to-intellij</id>
@@ -203,15 +223,15 @@
                         </goals>
                         <configuration>
                             <target>
-                                <mkdir dir="${intellij.plugins.dir}/${project.artifactId}/lib"/>
+                                <mkdir dir="${intellij.plugin.install.dir}"/>
                                 <copy file="${project.build.directory}/${project.build.finalName}.jar"
-                                      todir="${intellij.plugins.dir}/${project.artifactId}/lib"
+                                      todir="${intellij.plugin.install.dir}"
                                       overwrite="true"/>
                                 <echo level="info" message=""/>
                                 <echo level="info" message="========================================"/>
                                 <echo level="info" message="  Plugin installed successfully!"/>
-                                <echo level="info" message="  ${project.build.finalName}.jar"/>
-                                <echo level="info" message="  -> ${intellij.plugins.dir}/${project.artifactId}/lib"/>
+                                <echo level="info" message="  ${project.build.finalName}.jar  v${project.version}"/>
+                                <echo level="info" message="  -> ${intellij.plugin.install.dir}"/>
                                 <echo level="info" message="  Restart IntelliJ IDEA to load the update."/>
                                 <echo level="info" message="========================================"/>
                                 <echo level="info" message=""/>
