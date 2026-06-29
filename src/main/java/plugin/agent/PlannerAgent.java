@@ -2,89 +2,118 @@ package plugin.agent;
 
 import plugin.planning.ExecutionPlan;
 
+import java.util.*;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+/**
+ * Identifies task type, target symbol, and expands the query with
+ * domain-relevant terms before retrieval.
+ *
+ * Query expansion is key for Qwen2.5-Coder-7B: the BM25 index scores
+ * exact term matches, so expanding "generate tests for LocalLLMClient"
+ * to include "streamChat fetchModels endpoint HttpClient" surfaces the
+ * dependency files that give the model enough context to write correct tests.
+ */
 public class PlannerAgent {
 
     private static final Pattern CLASS_MENTION = Pattern.compile(
-            "\\b([A-Z][a-zA-Z0-9]+(?:Service|Client|Manager|Handler|Util|Controller|Repository|Factory|Builder|Test)?)\\b"
+            "\\b([A-Z][a-zA-Z0-9]+(?:Service|Client|Manager|Handler|Util|Controller" +
+            "|Repository|Factory|Builder|Test|Panel|Window|Action|Agent|Tool)?)\\b"
+    );
+
+    // Task-type → expansion terms added to the BM25 query
+    private static final Map<AgentTask.TaskType, String> EXPANSION = Map.of(
+            AgentTask.TaskType.GENERATE_TESTS, "test junit mockito assert verify beforeEach",
+            AgentTask.TaskType.FIX_BUG,        "error exception stacktrace fix compile",
+            AgentTask.TaskType.ADD_FEATURE,     "implement method interface service",
+            AgentTask.TaskType.REFACTOR,        "rename extract inline restructure",
+            AgentTask.TaskType.EXPLAIN_CODE,    "class method field dependency",
+            AgentTask.TaskType.DOCUMENT,        "javadoc param return throws"
     );
 
     public ExecutionPlan plan(AgentContext ctx) {
-        AgentTask task = ctx.getTask();
-        String message = task.userMessage();
-
-        AgentTask.TaskType type = detectTaskType(message);
+        AgentTask task    = ctx.getTask();
+        String message    = task.userMessage();
+        AgentTask.TaskType type   = detectTaskType(message);
         String targetSymbol = task.targetSymbol() != null ? task.targetSymbol() : detectTargetSymbol(message);
-        String targetFile = task.targetFile() != null ? task.targetFile() : "";
+        String targetFile   = task.targetFile()   != null ? task.targetFile()   : "";
 
         ExecutionPlan plan = new ExecutionPlan(message);
 
         switch (type) {
-            case GENERATE_TESTS -> {
-                plan.addStep("Find " + targetSymbol + " and its dependencies")
-                    .addStep("Find existing test patterns")
-                    .addStep("Read pom.xml for test framework")
-                    .addStep("Generate comprehensive JUnit 5 tests")
-                    .addStep("Run tests to verify")
-                    .withTestStrategy("JUnit 5 + Mockito, AAA pattern");
-            }
-            case FIX_BUG -> {
-                plan.addStep("Locate the failing code")
-                    .addStep("Retrieve related context")
-                    .addStep("Identify root cause")
-                    .addStep("Apply minimal fix")
-                    .addStep("Run build and tests");
-            }
-            case ADD_FEATURE -> {
-                plan.addStep("Analyze existing architecture")
-                    .addStep("Retrieve related components")
-                    .addStep("Plan minimal changes")
-                    .addStep("Implement feature")
-                    .addStep("Generate tests")
-                    .addStep("Validate build");
-            }
-            case REFACTOR -> {
-                plan.addStep("Retrieve all affected files")
-                    .addStep("Analyze current structure")
-                    .addStep("Apply refactoring")
-                    .addStep("Ensure no regressions");
-            }
-            case EXPLAIN_CODE -> {
-                plan.addStep("Retrieve " + targetSymbol)
-                    .addStep("Retrieve related dependencies")
-                    .addStep("Build explanation");
-            }
-            default -> {
-                plan.addStep("Retrieve relevant context")
-                    .addStep("Generate response");
-            }
+            case GENERATE_TESTS -> plan
+                    .addStep("PSI: locate " + targetSymbol + " and direct dependencies")
+                    .addStep("BM25: find existing test patterns and JUnit 5 examples")
+                    .addStep("Read pom.xml for test framework versions")
+                    .addStep("Rerank top-6 files for 7B context budget")
+                    .addStep("LLM: generate JUnit 5 + Mockito tests")
+                    .addStep("Apply CREATE_FILE, then run <RUN_TESTS test=\"" + targetSymbol + "Test\">")
+                    .withTestStrategy("JUnit 5 + Mockito · AAA pattern · edge cases + happy path");
+            case FIX_BUG -> plan
+                    .addStep("PSI: locate failing class")
+                    .addStep("BM25: find related error-handling patterns")
+                    .addStep("LLM: identify root cause and apply MODIFY_FILE fix")
+                    .addStep("Run <CHECK_COMPILATION /> then <RUN_TESTS />");
+            case ADD_FEATURE -> plan
+                    .addStep("PSI: analyse integration points in existing architecture")
+                    .addStep("BM25: retrieve related components")
+                    .addStep("LLM: design minimal implementation")
+                    .addStep("Apply file operations, generate tests, run build");
+            case REFACTOR -> plan
+                    .addStep("PSI: find all usages of target")
+                    .addStep("LLM: apply refactoring across affected files")
+                    .addStep("Run <CHECK_COMPILATION />");
+            case EXPLAIN_CODE -> plan
+                    .addStep("PSI: retrieve " + (targetSymbol.isEmpty() ? "relevant code" : targetSymbol))
+                    .addStep("BM25: collect dependency context")
+                    .addStep("LLM: explain");
+            default -> plan
+                    .addStep("BM25: find relevant context")
+                    .addStep("LLM: respond");
         }
 
         if (!targetSymbol.isEmpty()) plan.addAffectedFile(targetSymbol + ".java");
-        if (!targetFile.isEmpty()) plan.addAffectedFile(targetFile);
+        if (!targetFile.isEmpty())   plan.addAffectedFile(targetFile);
 
         ctx.setPlan(plan);
         ctx.getWorkingMemory().startTask(message, targetSymbol, targetFile);
-
         return plan;
+    }
+
+    /**
+     * Returns the original query augmented with task-specific expansion terms
+     * and the detected target symbol.  Used by RetrieverAgent as the BM25 query.
+     */
+    public String expandQuery(String query) {
+        AgentTask.TaskType type = detectTaskType(query);
+        String target = detectTargetSymbol(query);
+        StringBuilder expanded = new StringBuilder(query);
+        String extra = EXPANSION.get(type);
+        if (extra != null) expanded.append(' ').append(extra);
+        if (!target.isEmpty()) expanded.append(' ').append(target);
+        return expanded.toString();
     }
 
     public AgentTask.TaskType detectTaskType(String message) {
         String m = message.toLowerCase();
-        if (m.contains("test") || m.contains("spec") || m.contains("junit")) return AgentTask.TaskType.GENERATE_TESTS;
-        if (m.contains("fix") || m.contains("bug") || m.contains("error") || m.contains("fail")) return AgentTask.TaskType.FIX_BUG;
-        if (m.contains("add") || m.contains("implement") || m.contains("create") || m.contains("feature")) return AgentTask.TaskType.ADD_FEATURE;
-        if (m.contains("refactor") || m.contains("clean") || m.contains("rename")) return AgentTask.TaskType.REFACTOR;
-        if (m.contains("explain") || m.contains("what") || m.contains("how") || m.contains("why")) return AgentTask.TaskType.EXPLAIN_CODE;
-        if (m.contains("document") || m.contains("javadoc")) return AgentTask.TaskType.DOCUMENT;
+        if (m.contains("test") || m.contains("spec") || m.contains("junit"))
+            return AgentTask.TaskType.GENERATE_TESTS;
+        if (m.contains("fix") || m.contains("bug") || m.contains("error") || m.contains("fail"))
+            return AgentTask.TaskType.FIX_BUG;
+        if (m.contains("add") || m.contains("implement") || m.contains("create") || m.contains("feature"))
+            return AgentTask.TaskType.ADD_FEATURE;
+        if (m.contains("refactor") || m.contains("clean") || m.contains("rename"))
+            return AgentTask.TaskType.REFACTOR;
+        if (m.contains("explain") || m.contains("what") || m.contains("how") || m.contains("why"))
+            return AgentTask.TaskType.EXPLAIN_CODE;
+        if (m.contains("document") || m.contains("javadoc"))
+            return AgentTask.TaskType.DOCUMENT;
         return AgentTask.TaskType.GENERAL;
     }
 
     public String detectTargetSymbol(String message) {
         Matcher m = CLASS_MENTION.matcher(message);
-        if (m.find()) return m.group(1);
-        return "";
+        return m.find() ? m.group(1) : "";
     }
 }

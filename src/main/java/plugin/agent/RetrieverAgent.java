@@ -35,10 +35,9 @@ public class RetrieverAgent {
     }
 
     private String buildQuery(AgentContext ctx) {
-        StringBuilder query = new StringBuilder(ctx.getTask().userMessage());
-
-        String target = ctx.getTask().targetSymbol();
-        if (target != null && !target.isBlank()) query.append(" ").append(target);
+        // Use PlannerAgent.expandQuery so BM25 benefits from task-specific terms
+        String expanded = new PlannerAgent().expandQuery(ctx.getTask().userMessage());
+        StringBuilder query = new StringBuilder(expanded);
 
         if (ctx.getPlan() != null) {
             ctx.getPlan().getAffectedFiles().forEach(f -> query.append(" ").append(f));

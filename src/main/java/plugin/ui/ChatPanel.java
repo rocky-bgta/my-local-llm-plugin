@@ -9,8 +9,10 @@ import plugin.llm.LocalLLMClient;
 import plugin.llm.model.ChatMessage;
 import plugin.settings.PluginSettings;
 import plugin.agent.PlannerAgent;
+import plugin.llm.QwenPromptBuilder;
 import plugin.rag.ContextCollector;
 import plugin.rag.RetrievalResult;
+import plugin.testing.AutoFixLoop;
 import plugin.util.BuildUtil;
 import plugin.util.FileOperationUtil;
 import plugin.util.GitUtil;
@@ -38,8 +40,13 @@ public class ChatPanel {
     private Content tabContent;
     private boolean titleGenerated = false;
 
-    // Build auto-fix loop counter (reset per user message, max 2 fix attempts)
-    private int buildFixAttempts = 0;
+    // Auto-fix loop state — reset on each new user message
+    private int     buildFixAttempts       = 0;
+    private String  lastCompileFingerprint = "";
+    private String  lastTestFingerprint    = "";
+    // When true, a successful compile after a test-fix immediately re-runs the tests
+    private boolean inTestFixLoop          = false;
+    private String  testFixName            = null;
 
     // Chat display
     private JTextPane      chatPane;
@@ -389,7 +396,11 @@ public class ChatPanel {
         String text = promptArea.getText().trim();
         if (text.isEmpty()) return;
         newlyCreatedFiles.clear();
-        buildFixAttempts = 0;
+        buildFixAttempts       = 0;
+        lastCompileFingerprint = "";
+        lastTestFingerprint    = "";
+        inTestFixLoop          = false;
+        testFixName            = null;
 
         PluginSettings s  = PluginSettings.getInstance();
         String model      = s.getModel();
@@ -405,83 +416,8 @@ public class ChatPanel {
             // Hybrid RAG: retrieve only the most relevant files for this query
             String context = buildRagContext(text);
             String corrections = plugin.util.LLMCorrectionsUtil.loadCorrectionsForPrompt(project.getBasePath());
-            String correctionSection = corrections.isEmpty() ? "" :
-                    "\n\n" + corrections + "\n\n";
-
-            String systemInstructions = "You are a specialized AI coding assistant for this project. " +
-                    "I have provided you with the project structure and file contents below to help you understand the codebase." +
-                    correctionSection +
-                    "CRITICAL — PROJECT LANGUAGE: This is a Java 21 Maven project. " +
-                    "You MUST write ALL code in Java. " +
-                    "NEVER generate Go, Python, JavaScript, TypeScript, Kotlin, or any other language. " +
-                    "The build tool is Maven (pom.xml) — never use go build, go test, gradle, npm, or cargo.\n" +
-                    "Current Mode: " + mode + "\n" +
-                    "When in PLANNING mode, discuss the task and outline the steps. Do not use file operation tags.\n" +
-                    "If you believe the user wants to make changes to files, suggest they switch to EDITING mode.\n" +
-                    "EDITING MODE — MANDATORY FILE OPERATION RULES:\n" +
-                    "In EDITING mode you MUST write files using the XML tags below. There is NO other way to write to disk.\n" +
-                    "WRONG — this will NOT write the file (do not do this):\n" +
-                    "```markdown\n...file content...\n```\n" +
-                    "CORRECT — this WILL write the file (always do this instead):\n" +
-                    "<MODIFY_FILE path=\"src/main/java/plugin/ui/ChatPanel.java\">complete new file content here</MODIFY_FILE>\n" +
-                    "All available tags (use real project paths — NEVER use path/to/file or other placeholders):\n" +
-                    "<MODIFY_FILE path=\"src/main/java/plugin/ui/ChatPanel.java\">complete new file content</MODIFY_FILE>\n" +
-                    "<CREATE_FILE path=\"src/test/java/plugin/ChatMessageTest.java\">complete file content</CREATE_FILE>\n" +
-                    "<CREATE_FOLDER path=\"src/main/java/plugin/newpackage\" />\n" +
-                    "<DELETE_FILE path=\"src/test/java/plugin/OldTest.java\" />\n" +
-                    "<DELETE_FOLDER path=\"src/main/java/plugin/oldpackage\" />\n" +
-                    "<RUN_TESTS />\n" +
-                    "<RUN_TESTS test=\"ClassName\" />\n" +
-                    "<CHECK_COMPILATION />\n" +
-                    "<EXECUTE_COMMAND command=\"your-command-here\" />\n" +
-                    "<GIT_ADD_NEW />\n" +
-                    "Rules:\n" +
-                    "1. Output the raw XML tag directly — never wrap it in ``` fences.\n" +
-                    "2. Always include the COMPLETE file content inside the tag — never truncate or summarize.\n" +
-                    "3. You may add a brief explanation AFTER the closing XML tag.\n" +
-                    "4. If you use a ``` code block for file content, the file will NOT be changed.\n" +
-                    "5. To run all project tests, use the <RUN_TESTS /> tag.\n" +
-                    "6. To run a specific test case, use <RUN_TESTS test=\"ClassName\" /> (e.g., <RUN_TESTS test=\"ChatMessageTest\" />).\n" +
-                    "7. To check if the project compiles without running tests, use <CHECK_COMPILATION />. This will automatically detect the build system (Maven, Gradle, Go, etc.) and run the appropriate command.\n" +
-                    "8. For non-Java projects or if auto-detection fails, use <EXECUTE_COMMAND command=\"...\" /> to run build or test commands (e.g., <EXECUTE_COMMAND command=\"go build\" />).\n" +
-                    "9. To add ALL newly created files from the current task to Git, use <GIT_ADD_NEW />.\n" +
-                    "10. Tags can be combined (e.g., CREATE_FILE and then GIT_ADD_NEW).\n" +
-                    "Execute tasks one by one and inform the user of your progress.\n" +
-                    "JAVA TEST WRITING RULES — follow these whenever you generate or modify a Java test file:\n" +
-                    "0. LANGUAGE: This project is Java 21 Maven. Test files MUST be written in Java using JUnit 5. " +
-                    "NEVER write test code in Go (no 'func Test', no 'testing.T'), Python, or any other language.\n" +
-                    "1. READ THE SOURCE FILE FIRST. Before writing any test, read the actual class file to learn its real package, constructor signatures, method names, and return types. Never assume.\n" +
-                    "2. ALWAYS include all Java import statements at the top of the test file:\n" +
-                    "   - import org.junit.jupiter.api.Test;\n" +
-                    "   - import org.junit.jupiter.api.BeforeEach; (if used)\n" +
-                    "   - import static org.junit.jupiter.api.Assertions.*;\n" +
-                    "   - import <exact.package.ClassName>; for every class used in the test\n" +
-                    "   - import java.util.List; / import java.util.Map; etc. for any JDK type used\n" +
-                    "3. USE THE REAL CONSTRUCTOR. If the constructor requires arguments (e.g. LocalLLMClient(String baseUrl)), pass them. Never call new LocalLLMClient() if no no-arg constructor exists.\n" +
-                    "4. USE REAL METHOD NAMES. Only call methods that actually exist on the class. Do not invent methods like getSetting(String key) or sendMessage(ChatMessage). Verify by reading the source file.\n" +
-                    "5. RECORD FIELD ORDER. Java records expose fields in declaration order. ChatMessage is defined as record ChatMessage(String role, String content) — so new ChatMessage(\"user\", \"Hello\") is correct; new ChatMessage(\"Hello\", \"user\") is WRONG.\n" +
-                    "6. DO NOT UNIT TEST IntelliJ PLATFORM CLASSES. plugin.ui.ChatPanel requires a live com.intellij.openapi.project.Project instance and cannot be unit-tested outside the IDE. The same applies to any class in plugin.ui or plugin.toolwindow. Testable classes are: plugin.llm.model.ChatMessage, plugin.settings.PluginSettings, plugin.llm.LocalLLMClient.\n" +
-                    "   If you are asked to FIX compilation errors in ChatPanelTest or any other IntelliJ-platform-dependent test file, do NOT attempt to fix the errors — they are unfixable without a running IDE. Instead:\n" +
-                    "   a) Delete the broken file: <DELETE_FILE path=\"src/test/java/plugin/ui/ChatPanelTest.java\" />\n" +
-                    "   b) Then write correct tests for a testable class (ChatMessage, PluginSettings, or LocalLLMClient) using <CREATE_FILE path=\"src/test/java/plugin/FooTest.java\">.\n" +
-                    "7. TEST ONLY WHAT IS TESTABLE. For classes that make network calls (like LocalLLMClient), test construction and that network errors throw exceptions — do not try to assert on live server responses.\n" +
-                    "8. CORRECT FILE PATHS FOR TESTS. Java test files MUST go in src/test/java/ mirroring the package. For this project all tests go in src/test/java/plugin/ — for example src/test/java/plugin/ChatMessageTest.java. NEVER use placeholder paths like path/to/file.\n" +
-                    "9. CREATE_FILE vs MODIFY_FILE. Use <CREATE_FILE path=\"src/test/java/plugin/FooTest.java\"> for test files that do not yet exist. Use <MODIFY_FILE> only to update a file that already exists.\n" +
-                    "10. PROTECTED TEST FILES. The following test files already exist and are correct — do NOT delete them, do NOT move them, do NOT change their package or class name:\n" +
-                    "    src/test/java/plugin/ChatMessageTest.java\n" +
-                    "    src/test/java/plugin/PluginSettingsTest.java\n" +
-                    "    src/test/java/plugin/LocalLLMClientTest.java\n" +
-                    "    You may only MODIFY their content via <MODIFY_FILE> with valid JUnit 5 content.\n" +
-                    "When in BYPASS mode, ignore file operations and behave like a general assistant.\n" +
-                    "PLANNING mode is for discussion and outlining steps. File modification tags are ignored in this mode, but test execution and Git operations are allowed.\n" +
-                    "EDITING mode is required to write files to disk or perform delete operations.\n" +
-                    "Tests, compilation checks, custom commands, and Git operations can be run in ANY mode using the respective tags.\n" +
-                    "Maintain the session context until the user says to discard it.\n" +
-                    "If the user asks about the project structure or specific files, use the provided context to answer. " +
-                    "Always refer to the 'Current Project Structure' section for the complete file hierarchy. " +
-                    "If a file is not listed there, it does not exist in the project.\n" +
-                    "When asked for the project structure, provide ONLY the visual tree representation (using ├──, └──, │) from the 'Current Project Structure' section. " +
-                    "DO NOT include file contents, headers like '--- CONTENT START ---', or any additional text within the tree code block.";
+            // QwenPromptBuilder: compact system prompt tuned for Qwen2.5-Coder-7B/VL-7B
+            String systemInstructions = QwenPromptBuilder.buildSystemPrompt(mode, corrections);
             
             history.add(new ChatMessage("system", systemInstructions));
 
@@ -862,52 +798,45 @@ public class ChatPanel {
                 SwingUtilities.invokeLater(() -> {
                     if (result.success()) {
                         appendSystemMessage("✓ Build successful.");
-                        setLoading(false);
-                    } else if (buildFixAttempts < 2) {
+                        lastCompileFingerprint = "";
+                        // If we were fixing a test failure, re-run the tests now
+                        if (inTestFixLoop) {
+                            inTestFixLoop = false;
+                            appendSystemMessage("Compile passed after test fix — re-running tests…");
+                            scheduleTestRun(model, endpoint, testFixName);
+                        } else {
+                            setLoading(false);
+                        }
+                    } else if (buildFixAttempts < AutoFixLoop.MAX_COMPILE_ATTEMPTS) {
                         buildFixAttempts++;
                         String errors = result.output();
-                        if (errors.length() > 3000) errors = errors.substring(0, 3000) + "\n[...truncated]";
 
-                        boolean syntaxError = isSimpleSyntaxError(errors);
-                        // Tell the LLM the exact MODIFY_FILE path so it doesn't have to guess
+                        // Fingerprint to detect stuck loop
+                        String fp = AutoFixLoop.extractCompileFingerprint(errors);
+                        boolean sameError = AutoFixLoop.isSameError(lastCompileFingerprint, fp);
+                        lastCompileFingerprint = fp;
+
                         String pathHint = brokenPaths.isEmpty() ? "" :
-                                "\nUse EXACTLY this tag to write the fix:\n" +
+                                "\nUse EXACTLY this tag:\n" +
                                 "<MODIFY_FILE path=\"" + brokenPaths.get(0) + "\">\n" +
-                                "// complete corrected Java file content here\n" +
-                                "</MODIFY_FILE>\n";
+                                "// complete corrected file content\n" +
+                                "</MODIFY_FILE>";
 
-                        String fixInstruction;
-                        String contextLabel;
-                        if (syntaxError) {
-                            fixInstruction =
-                                "The file has a simple syntax error (e.g. missing `}`, `;`, or `)`).\n" +
-                                "Look at the error line number and the file content below.\n" +
-                                "Find ONLY the syntax mistake and fix it — do NOT rewrite the logic.\n" +
-                                pathHint;
-                            contextLabel = "\nCurrent content of the broken file (find and fix the syntax error):\n";
-                        } else {
-                            fixInstruction =
-                                "The code has compile errors. Fix ALL errors now.\n" +
-                                "Use ONLY the methods and constructors shown in the source files below.\n" +
-                                pathHint;
-                            contextLabel =
-                                "\nRelevant source files (use ONLY these methods and constructors):\n";
-                        }
-                        String contextSection = sourceContext.isEmpty() ? "" : contextLabel + sourceContext;
+                        String fixInstruction = QwenPromptBuilder.buildCompileFixPrompt(
+                                errors, pathHint, sourceContext, buildFixAttempts, sameError);
 
-                        appendSystemMessage("⚠ Build errors — scanning project and asking LLM to fix " +
-                                "(attempt " + buildFixAttempts + "/2)…");
-                        history.add(new ChatMessage("user",
-                                fixInstruction +
-                                "\nBuild output:\n" + errors +
-                                contextSection));
+                        appendSystemMessage("⚠ Build errors — asking LLM to fix " +
+                                "(attempt " + buildFixAttempts + "/" +
+                                AutoFixLoop.MAX_COMPILE_ATTEMPTS + ")…");
+                        history.add(new ChatMessage("user", fixInstruction));
                         beginAssistantMessage();
                         blinkTimer.start();
                         streamAndHandle(model, endpoint, null, false);
                     } else {
                         String errors = result.output();
                         if (errors.length() > 3000) errors = errors.substring(0, 3000) + "\n[...truncated]";
-                        appendSystemMessage("❌ Build failed:\n" + errors);
+                        appendSystemMessage("❌ Build failed after " +
+                                AutoFixLoop.MAX_COMPILE_ATTEMPTS + " attempts:\n" + errors);
                         setLoading(false);
                     }
                 });
@@ -946,46 +875,40 @@ public class ChatPanel {
                         if (!rawOutput.isBlank()) output.append("\n").append(rawOutput);
                         appendSystemMessage(output.toString());
 
-                        if (buildFixAttempts < 2) {
+                        if (buildFixAttempts < AutoFixLoop.MAX_TEST_ATTEMPTS) {
                             buildFixAttempts++;
-                            String errors = rawOutput.length() > 3000
-                                    ? rawOutput.substring(0, 3000) + "\n[...truncated]" : rawOutput;
+                            String errors = rawOutput;
 
-                            boolean syntaxError = isSimpleSyntaxError(errors);
+                            // Fingerprint to detect stuck loop
+                            String fp = AutoFixLoop.extractTestFingerprint(errors);
+                            boolean sameError = AutoFixLoop.isSameError(lastTestFingerprint, fp);
+                            lastTestFingerprint = fp;
+
                             String pathHint = brokenPaths.isEmpty() ? "" :
-                                    "\nUse EXACTLY this tag to write the fix:\n" +
+                                    "\nUse EXACTLY this tag:\n" +
                                     "<MODIFY_FILE path=\"" + brokenPaths.get(0) + "\">\n" +
-                                    "// complete corrected Java file content here\n" +
-                                    "</MODIFY_FILE>\n";
-                            String fixInstruction;
-                            String contextLabel;
-                            if (syntaxError) {
-                                fixInstruction =
-                                    "The test file has a syntax error (e.g. missing `}`).\n" +
-                                    "Look at the error line number and the file content below.\n" +
-                                    "Fix ONLY the syntax mistake — do NOT rewrite the logic.\n" +
-                                    pathHint;
-                                contextLabel = "\nCurrent content of the broken file (find and fix the syntax error):\n";
-                            } else {
-                                fixInstruction =
-                                    "The tests have failures. Fix the failing assertions now.\n" +
-                                    "Use ONLY the methods shown in the source files below.\n" +
-                                    pathHint;
-                                contextLabel =
-                                    "\nRelevant source files (use ONLY these methods):\n";
-                            }
-                            String contextSection = sourceContext.isEmpty() ? "" : contextLabel + sourceContext;
+                                    "// complete corrected file content\n" +
+                                    "</MODIFY_FILE>";
 
-                            appendSystemMessage("⚠ Test failures — scanning project and asking LLM to fix " +
-                                    "(attempt " + buildFixAttempts + "/2)…");
-                            history.add(new ChatMessage("user",
-                                    fixInstruction +
-                                    "\nTest output:\n" + errors +
-                                    contextSection));
+                            String fixInstruction = QwenPromptBuilder.buildTestFixPrompt(
+                                    errors, pathHint, sourceContext, buildFixAttempts, sameError);
+
+                            // Set flag so that after the LLM writes a fix and it compiles,
+                            // scheduleBuildCheck will re-run the tests automatically
+                            inTestFixLoop = true;
+                            testFixName   = testName;
+
+                            appendSystemMessage("⚠ Test failures — asking LLM to fix " +
+                                    "(attempt " + buildFixAttempts + "/" +
+                                    AutoFixLoop.MAX_TEST_ATTEMPTS + ")…");
+                            history.add(new ChatMessage("user", fixInstruction));
                             beginAssistantMessage();
                             blinkTimer.start();
                             streamAndHandle(model, endpoint, null, false);
                         } else {
+                            inTestFixLoop = false;
+                            appendSystemMessage("❌ Tests still failing after " +
+                                    AutoFixLoop.MAX_TEST_ATTEMPTS + " attempts.");
                             setLoading(false);
                         }
                     }
@@ -1255,6 +1178,10 @@ public class ChatPanel {
         if (tabContent != null) tabContent.setDisplayName("New Chat");
         appendSystemMessage("Chat cleared. New conversation started.");
         promptArea.requestFocusInWindow();
+        lastCompileFingerprint = "";
+        lastTestFingerprint    = "";
+        inTestFixLoop          = false;
+        testFixName            = null;
         // Refresh RAG index so new/modified files are picked up
         daemon(() -> {
             if (contextCollector != null) contextCollector.reindex();
@@ -1300,8 +1227,10 @@ public class ChatPanel {
             if (contextCollector == null) {
                 contextCollector = new ContextCollector(project);
             }
-            String target = new PlannerAgent().detectTargetSymbol(query);
-            List<RetrievalResult> results = contextCollector.collect(query, target, 8);
+            PlannerAgent planner = new PlannerAgent();
+            String target   = planner.detectTargetSymbol(query);
+            String expanded = planner.expandQuery(query);   // BM25 query expansion
+            List<RetrievalResult> results = contextCollector.collect(expanded, target, 6);
             if (results.isEmpty()) return "";
             StringBuilder sb = new StringBuilder();
             for (RetrievalResult r : results) {
