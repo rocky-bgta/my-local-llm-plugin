@@ -28,4 +28,35 @@
 
     </extensions>
 
+    <actions>
+        <group id="LocalLLM.ActionGroup" text="Local LLM" popup="true">
+            <add-to-group group-id="EditorPopupMenu" anchor="last"/>
+            <add-to-group group-id="ProjectViewPopupMenu" anchor="last"/>
+        </group>
+
+        <action id="LocalLLM.OpenChat"
+                class="plugin.action.OpenChatAction"
+                text="Open Local LLM Chat"
+                description="Open the Local LLM chat panel">
+            <add-to-group group-id="LocalLLM.ActionGroup" anchor="first"/>
+            <keyboard-shortcut keymap="$default" first-keystroke="ctrl alt L"/>
+        </action>
+
+        <action id="LocalLLM.ExplainCode"
+                class="plugin.action.ExplainCodeAction"
+                text="Explain Selected Code"
+                description="Send selected code to Local LLM for explanation">
+            <add-to-group group-id="LocalLLM.ActionGroup" anchor="after" relative-to-action="LocalLLM.OpenChat"/>
+            <keyboard-shortcut keymap="$default" first-keystroke="ctrl alt E"/>
+        </action>
+
+        <action id="LocalLLM.GenerateTest"
+                class="plugin.action.GenerateTestAction"
+                text="Generate Tests for This File"
+                description="Ask Local LLM to generate JUnit 5 tests for the current file">
+            <add-to-group group-id="LocalLLM.ActionGroup" anchor="last"/>
+            <keyboard-shortcut keymap="$default" first-keystroke="ctrl alt T"/>
+        </action>
+    </actions>
+
 </idea-plugin>

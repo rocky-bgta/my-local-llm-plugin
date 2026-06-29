@@ -8,10 +8,12 @@ import org.jetbrains.annotations.NotNull;
 import plugin.llm.LocalLLMClient;
 import plugin.llm.model.ChatMessage;
 import plugin.settings.PluginSettings;
+import plugin.agent.PlannerAgent;
+import plugin.rag.ContextCollector;
+import plugin.rag.RetrievalResult;
 import plugin.util.BuildUtil;
 import plugin.util.FileOperationUtil;
 import plugin.util.GitUtil;
-import plugin.util.ProjectContextUtil;
 
 import javax.swing.*;
 import javax.swing.border.EmptyBorder;
@@ -64,6 +66,9 @@ public class ChatPanel {
 
     // Track newly created files for Git
     private final List<String> newlyCreatedFiles = new ArrayList<>();
+
+    // Hybrid RAG: initialized lazily so it doesn't block the EDT constructor
+    private volatile ContextCollector contextCollector;
 
     // Text styles
     private Style userRoleStyle;
@@ -397,7 +402,8 @@ public class ChatPanel {
 
         // Add system message with context if history is empty or it's a new conversation
         if (history.isEmpty()) {
-            String context = ProjectContextUtil.getProjectContext(project, s.isIncludeFullContext());
+            // Hybrid RAG: retrieve only the most relevant files for this query
+            String context = buildRagContext(text);
             String corrections = plugin.util.LLMCorrectionsUtil.loadCorrectionsForPrompt(project.getBasePath());
             String correctionSection = corrections.isEmpty() ? "" :
                     "\n\n" + corrections + "\n\n";
@@ -479,16 +485,18 @@ public class ChatPanel {
             
             history.add(new ChatMessage("system", systemInstructions));
 
-            // System prompt + context
-            if (context.length() > 6000) {
-                List<String> chunks = ProjectContextUtil.splitIntoChunks(context, 6000);
-                for (int i = 0; i < chunks.size(); i++) {
-                    history.add(new ChatMessage("user", "Project Context (Part " + (i + 1) + "/" + chunks.size() + "):\n" + chunks.get(i)));
-                    history.add(new ChatMessage("assistant", "Received context part " + (i + 1) + ". Please continue."));
+            // Inject RAG context (already focused — usually fits in one block)
+            if (!context.isBlank()) {
+                if (context.length() > 6000) {
+                    List<String> chunks = splitIntoChunks(context, 6000);
+                    for (int i = 0; i < chunks.size(); i++) {
+                        history.add(new ChatMessage("user", "Retrieved Context (Part " + (i + 1) + "/" + chunks.size() + "):\n" + chunks.get(i)));
+                        history.add(new ChatMessage("assistant", "Received context part " + (i + 1) + ". Please continue."));
+                    }
+                } else {
+                    history.add(new ChatMessage("user", "Retrieved Context (RAG — most relevant files for this query):\n" + context));
+                    history.add(new ChatMessage("assistant", "Retrieved context loaded. How can I help you?"));
                 }
-            } else {
-                history.add(new ChatMessage("user", "Project Context:\n" + context));
-                history.add(new ChatMessage("assistant", "Received project context. How can I help you today?"));
             }
         } else {
             // Update mode in system message if it already exists
@@ -503,7 +511,7 @@ public class ChatPanel {
         
         // Split large user message into chunks if necessary (max 6000 chars per part)
         if (text.length() > 6000) {
-            List<String> chunks = ProjectContextUtil.splitIntoChunks(text, 6000);
+            List<String> chunks = splitIntoChunks(text, 6000);
             for (int i = 0; i < chunks.size() - 1; i++) {
                 history.add(new ChatMessage("user", "Message Part " + (i + 1) + "/" + chunks.size() + ":\n" + chunks.get(i)));
                 history.add(new ChatMessage("assistant", "Part " + (i + 1) + " received. Please send the next part."));
@@ -530,12 +538,12 @@ public class ChatPanel {
             // 1. Always keep the system prompt (instruction)
             trimmed.add(snapshot.get(0));
             
-            // 2. Keep all project context messages (crucial for codebase understanding)
-            // They are usually sent at the very beginning after the system prompt
+            // 2. Keep RAG context injection messages at the start of the conversation
             int lastContextIndex = 0;
             for (int i = 1; i < snapshot.size(); i++) {
                 String content = snapshot.get(i).content();
-                if (content != null && (content.contains("Project Context") || content.contains("Received context part") || content.contains("Received project context"))) {
+                if (content != null && (content.contains("Retrieved Context") || content.contains("Received context part")
+                        || content.contains("Project Context") || content.contains("Received project context"))) {
                     trimmed.add(snapshot.get(i));
                     lastContextIndex = i;
                 }
@@ -847,7 +855,10 @@ public class ChatPanel {
             daemon(() -> {
                 BuildUtil.BuildResult result = BuildUtil.runCompile(project);
                 // Scan for source files WHILE still in daemon thread — never on EDT
-                String sourceContext = result.success() ? "" : scanProjectForErrorContext(result.output());
+                java.util.List<String> brokenPaths = result.success()
+                        ? java.util.Collections.emptyList()
+                        : extractBrokenFilePaths(result.output());
+                String sourceContext = result.success() ? "" : scanProjectForErrorContext(result.output(), brokenPaths);
                 SwingUtilities.invokeLater(() -> {
                     if (result.success()) {
                         appendSystemMessage("✓ Build successful.");
@@ -858,20 +869,27 @@ public class ChatPanel {
                         if (errors.length() > 3000) errors = errors.substring(0, 3000) + "\n[...truncated]";
 
                         boolean syntaxError = isSimpleSyntaxError(errors);
+                        // Tell the LLM the exact MODIFY_FILE path so it doesn't have to guess
+                        String pathHint = brokenPaths.isEmpty() ? "" :
+                                "\nUse EXACTLY this tag to write the fix:\n" +
+                                "<MODIFY_FILE path=\"" + brokenPaths.get(0) + "\">\n" +
+                                "// complete corrected Java file content here\n" +
+                                "</MODIFY_FILE>\n";
+
                         String fixInstruction;
                         String contextLabel;
                         if (syntaxError) {
                             fixInstruction =
-                                "The file has a simple syntax error (e.g. missing `}`, `;`, or `)`). " +
-                                "Look at the error line number and the file content below. " +
-                                "Find ONLY the syntax mistake and fix it — do NOT rewrite the logic. " +
-                                "Re-output the COMPLETE corrected file using <MODIFY_FILE>.\n";
-                            contextLabel = "\nCurrent content of the broken file:\n";
+                                "The file has a simple syntax error (e.g. missing `}`, `;`, or `)`).\n" +
+                                "Look at the error line number and the file content below.\n" +
+                                "Find ONLY the syntax mistake and fix it — do NOT rewrite the logic.\n" +
+                                pathHint;
+                            contextLabel = "\nCurrent content of the broken file (find and fix the syntax error):\n";
                         } else {
                             fixInstruction =
-                                "The code has compile errors. Fix ALL errors now. " +
-                                "Use ONLY the methods and constructors shown in the source files below. " +
-                                "Use <MODIFY_FILE> or <CREATE_FILE> XML tags for every file you change.\n";
+                                "The code has compile errors. Fix ALL errors now.\n" +
+                                "Use ONLY the methods and constructors shown in the source files below.\n" +
+                                pathHint;
                             contextLabel =
                                 "\nRelevant source files (use ONLY these methods and constructors):\n";
                         }
@@ -902,7 +920,10 @@ public class ChatPanel {
             daemon(() -> {
                 BuildUtil.BuildResult result = BuildUtil.runTest(project, testName);
                 // Scan for source files WHILE still in daemon thread — never on EDT
-                String sourceContext = result.success() ? "" : scanProjectForErrorContext(result.output());
+                java.util.List<String> brokenPaths = result.success()
+                        ? java.util.Collections.emptyList()
+                        : extractBrokenFilePaths(result.output());
+                String sourceContext = result.success() ? "" : scanProjectForErrorContext(result.output(), brokenPaths);
                 SwingUtilities.invokeLater(() -> {
                     if (result.success()) {
                         appendSystemMessage("✓ Tests passed successfully.");
@@ -931,19 +952,25 @@ public class ChatPanel {
                                     ? rawOutput.substring(0, 3000) + "\n[...truncated]" : rawOutput;
 
                             boolean syntaxError = isSimpleSyntaxError(errors);
+                            String pathHint = brokenPaths.isEmpty() ? "" :
+                                    "\nUse EXACTLY this tag to write the fix:\n" +
+                                    "<MODIFY_FILE path=\"" + brokenPaths.get(0) + "\">\n" +
+                                    "// complete corrected Java file content here\n" +
+                                    "</MODIFY_FILE>\n";
                             String fixInstruction;
                             String contextLabel;
                             if (syntaxError) {
                                 fixInstruction =
-                                    "The test file has a syntax error. Look at the error and the file content. " +
-                                    "Fix ONLY the syntax mistake — do NOT rewrite the logic. " +
-                                    "Re-output the complete corrected file using <MODIFY_FILE>.\n";
-                                contextLabel = "\nCurrent content of the broken file:\n";
+                                    "The test file has a syntax error (e.g. missing `}`).\n" +
+                                    "Look at the error line number and the file content below.\n" +
+                                    "Fix ONLY the syntax mistake — do NOT rewrite the logic.\n" +
+                                    pathHint;
+                                contextLabel = "\nCurrent content of the broken file (find and fix the syntax error):\n";
                             } else {
                                 fixInstruction =
-                                    "The tests have failures. Fix the failing assertions now. " +
-                                    "Use ONLY the methods shown in the source files below. " +
-                                    "Use <MODIFY_FILE> XML tags to fix the test file.\n";
+                                    "The tests have failures. Fix the failing assertions now.\n" +
+                                    "Use ONLY the methods shown in the source files below.\n" +
+                                    pathHint;
                                 contextLabel =
                                     "\nRelevant source files (use ONLY these methods):\n";
                             }
@@ -968,6 +995,26 @@ public class ChatPanel {
     }
 
     /**
+     * Extracts relative file paths (e.g. "src/test/java/plugin/FooTest.java") from Maven error output.
+     * Works with both forward-slash and back-slash separators.
+     */
+    private static java.util.List<String> extractBrokenFilePaths(String errorOutput) {
+        String normalised = errorOutput.replace("\\", "/");
+        java.util.Set<String> paths = new java.util.LinkedHashSet<>();
+        // Match Java file paths followed by :[line,col] markers
+        java.util.regex.Matcher m = java.util.regex.Pattern
+                .compile("[^\\s]+\\.java(?::\\[?\\d[^\\s]*)?").matcher(normalised);
+        while (m.find()) {
+            String hit = m.group(0).replaceAll(":\\[?\\d.*", ""); // strip :[line,col]
+            int srcIdx = hit.indexOf("/src/");
+            if (srcIdx >= 0) {
+                paths.add(hit.substring(srcIdx + 1)); // "src/test/java/plugin/Foo.java"
+            }
+        }
+        return new java.util.ArrayList<>(paths);
+    }
+
+    /**
      * Returns true when the error is a simple syntax mistake (missing brace, semicolon, etc.)
      * that the LLM should fix by patching the file, not by studying the source API.
      */
@@ -988,8 +1035,11 @@ public class ChatPanel {
      * Scans src/main/java for source files whose class names appear in the error output,
      * and ALWAYS includes the failing test file itself.
      * Called off the EDT (daemon thread only).
+     *
+     * @param knownBrokenPaths pre-extracted relative paths from extractBrokenFilePaths()
      */
-    private String scanProjectForErrorContext(String errorOutput) {
+    private String scanProjectForErrorContext(String errorOutput,
+                                              java.util.List<String> knownBrokenPaths) {
         // Normalise separators — Maven on Windows can emit either \ or /
         String normalised = errorOutput.replace("\\", "/");
 
@@ -1034,31 +1084,39 @@ public class ChatPanel {
             }
         }
 
-        // ALWAYS include the failing test file — this is critical for syntax error fixes
-        java.nio.file.Path srcTest = java.nio.file.Paths.get(basePath, "src", "test", "java");
-        java.util.regex.Matcher tf =
-                java.util.regex.Pattern.compile("/(\\w+Test)\\.java").matcher(normalised);
-        java.util.Set<String> testFiles = new java.util.LinkedHashSet<>();
-        while (tf.find()) testFiles.add(tf.group(1));
-
-        // Fallback: if no test file found in error text, scan the whole test tree
-        if (testFiles.isEmpty()) {
-            try {
-                java.nio.file.Files.walk(srcTest)
-                        .filter(p -> p.getFileName().toString().endsWith("Test.java"))
-                        .forEach(p -> testFiles.add(p.getFileName().toString().replace(".java", "")));
-            } catch (Exception ignored) {}
+        // ALWAYS include the failing test file(s) — critical for syntax error fixes.
+        // Use pre-extracted paths when available (more reliable than regex on Windows paths).
+        java.util.Set<String> testFilesToRead = new java.util.LinkedHashSet<>();
+        for (String rel : knownBrokenPaths) {
+            if (rel.endsWith("Test.java") || rel.contains("test/")) {
+                testFilesToRead.add(rel);
+            }
+        }
+        // Fallback to regex only when no paths were extracted
+        if (testFilesToRead.isEmpty()) {
+            java.util.regex.Matcher tf =
+                    java.util.regex.Pattern.compile("/(\\w+Test)\\.java").matcher(normalised);
+            java.util.Set<String> testClassNames = new java.util.LinkedHashSet<>();
+            while (tf.find()) testClassNames.add(tf.group(1));
+            java.nio.file.Path srcTest = java.nio.file.Paths.get(basePath, "src", "test", "java");
+            for (String testClass : testClassNames) {
+                try {
+                    java.util.Optional<java.nio.file.Path> found = java.nio.file.Files.walk(srcTest)
+                            .filter(p -> p.getFileName().toString().equals(testClass + ".java"))
+                            .findFirst();
+                    found.ifPresent(p -> testFilesToRead.add(
+                            java.nio.file.Paths.get(basePath).relativize(p).toString().replace("\\", "/")));
+                } catch (Exception ignored) {}
+            }
         }
 
-        for (String testClass : testFiles) {
+        for (String relPath : testFilesToRead) {
             try {
-                java.util.Optional<java.nio.file.Path> found = java.nio.file.Files.walk(srcTest)
-                        .filter(p -> p.getFileName().toString().equals(testClass + ".java"))
-                        .findFirst();
-                if (found.isPresent()) {
-                    String content = java.nio.file.Files.readString(found.get(),
-                            java.nio.charset.StandardCharsets.UTF_8);
-                    context.append("=== ").append(testClass).append(".java (current content — fix this file) ===\n")
+                java.nio.file.Path abs = java.nio.file.Paths.get(basePath, relPath.replace("/", java.io.File.separator));
+                if (java.nio.file.Files.exists(abs)) {
+                    String content = java.nio.file.Files.readString(abs, java.nio.charset.StandardCharsets.UTF_8);
+                    String label = java.nio.file.Paths.get(relPath).getFileName().toString();
+                    context.append("=== ").append(label).append(" (current content — fix this file) ===\n")
                            .append(content).append("\n\n");
                 }
             } catch (Exception ignored) {}
@@ -1197,6 +1255,10 @@ public class ChatPanel {
         if (tabContent != null) tabContent.setDisplayName("New Chat");
         appendSystemMessage("Chat cleared. New conversation started.");
         promptArea.requestFocusInWindow();
+        // Refresh RAG index so new/modified files are picked up
+        daemon(() -> {
+            if (contextCollector != null) contextCollector.reindex();
+        });
     }
 
     private void recordMistakes(java.util.List<String> mistakeKeys) {
@@ -1227,6 +1289,41 @@ public class ChatPanel {
         history.add(new ChatMessage("assistant",
                 "Understood. I will delete the untestable test file and write correct tests " +
                 "only for ChatMessage, PluginSettings, or LocalLLMClient."));
+    }
+
+    /**
+     * Hybrid RAG: PSI class-finder → dependency graph → embedding TF-IDF search → rerank → top-8 files.
+     * Falls back to empty string if the index is not ready or the project is too small to benefit.
+     */
+    private String buildRagContext(String query) {
+        try {
+            if (contextCollector == null) {
+                contextCollector = new ContextCollector(project);
+            }
+            String target = new PlannerAgent().detectTargetSymbol(query);
+            List<RetrievalResult> results = contextCollector.collect(query, target, 8);
+            if (results.isEmpty()) return "";
+            StringBuilder sb = new StringBuilder();
+            for (RetrievalResult r : results) {
+                String lang = r.relativeFilePath() != null && r.relativeFilePath().endsWith(".xml") ? "xml" : "java";
+                sb.append("=== ").append(r.relativeFilePath())
+                  .append(" [").append(r.symbolType()).append("] ===\n```").append(lang).append("\n");
+                sb.append(r.content());
+                sb.append("\n```\n\n");
+            }
+            return sb.toString();
+        } catch (Exception e) {
+            return "";
+        }
+    }
+
+    private static List<String> splitIntoChunks(String text, int chunkSize) {
+        List<String> chunks = new ArrayList<>();
+        int len = text.length();
+        for (int i = 0; i < len; i += chunkSize) {
+            chunks.add(text.substring(i, Math.min(i + chunkSize, len)));
+        }
+        return chunks;
     }
 
     private static void daemon(Runnable r) {
