@@ -30,6 +30,8 @@ public final class QwenPromptBuilder {
         sb.append("<RUN_TESTS />  or  <RUN_TESTS test=\"ClassName\" />\n");
         sb.append("<CHECK_COMPILATION />\n");
         sb.append("<EXECUTE_COMMAND command=\"...\" />\n");
+        sb.append("TEST REQUESTS: write JUnit 5 tests directly from retrieved context. Do not use tree/ls/dir or custom commands to inspect structure. If no class is named, choose the most relevant source class and create its test file.\n");
+        sb.append("For project structure, use `tree /F /A` on Windows or `tree -a --noreport` on Unix.\n");
         sb.append("<GIT_ADD_NEW />\n\n");
 
         sb.append("Java rules:\n");

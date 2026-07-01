@@ -33,6 +33,10 @@ public class LLMCorrectionsUtil {
         RULES.put("use-xml-tags",
                 "In EDITING mode, ALWAYS use <MODIFY_FILE> or <CREATE_FILE> XML tags to write files. " +
                 "Markdown ``` code blocks and plain text descriptions do NOT write to disk.");
+        RULES.put("no-tree-for-tests",
+                "When asked to write tests, NEVER inspect the directory tree with tree/ls/dir or " +
+                "custom commands. Use the retrieved source context and write a concrete JUnit 5 test file directly. " +
+                "If no class is named, choose the most relevant source class from context and create its test file.");
         RULES.put("junit5-only",
                 "ALWAYS use JUnit 5 syntax (import org.junit.jupiter.api.Test). NEVER use JUnit 4 " +
                 "annotations like @Test(expected=...) or @RunWith. " +

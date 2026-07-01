@@ -442,6 +442,10 @@ public class ChatPanel {
             
             history.add(new ChatMessage("system", systemInstructions));
 
+            String envInfo = plugin.util.EnvironmentInfoCollector.collectForPrompt(project);
+            history.add(new ChatMessage("user", "Developer Environment Info:\n" + envInfo));
+            history.add(new ChatMessage("assistant", "Environment information loaded."));
+
             // Inject RAG context (already focused — usually fits in one block)
             if (!context.isBlank()) {
                 if (context.length() > 6000) {
@@ -475,12 +479,6 @@ public class ChatPanel {
             }
             history.add(new ChatMessage("user", "Final Part " + chunks.size() + "/" + chunks.size() + ":\n" + chunks.get(chunks.size() - 1)));
         } else {
-            // Inject env info as context before the user query if requested
-            if (detectedType == AgentTask.TaskType.ENV_INFO) {
-                String envInfo = plugin.util.EnvironmentInfoCollector.collect(project);
-                history.add(new ChatMessage("user", "Developer Environment Info:\n" + envInfo));
-                history.add(new ChatMessage("assistant", "Environment information loaded. Ready to help."));
-            }
             history.add(new ChatMessage("user", text));
         }
 
@@ -490,10 +488,10 @@ public class ChatPanel {
         blinkTimer.start();
         setLoading(true);
 
-        streamAndHandle(model, endpoint, text, true);
+        streamAndHandle(model, endpoint, text, true, detectedType);
     }
 
-    private void streamAndHandle(String model, String endpoint, String userText, boolean canRetry) {
+    private void streamAndHandle(String model, String endpoint, String userText, boolean canRetry, AgentTask.TaskType taskType) {
         List<ChatMessage> snapshot = new ArrayList<>(history);
         // History management: preserve system prompt, initial project context, and recent conversation
         if (snapshot.size() > 30) {
@@ -565,7 +563,7 @@ public class ChatPanel {
                                     "Re-send your response using UPPERCASE tags with the complete file content inside."));
                             beginAssistantMessage();
                             blinkTimer.start();
-                            streamAndHandle(model, endpoint, null, false);
+                            streamAndHandle(model, endpoint, null, false, taskType);
                         } else if (hasFileOps || hasTests || hasCustomCommand) {
                             FileOperationUtil.FileOpResult opResult = FileOperationUtil.processFileOperations(project, fullResponse);
                             if (opResult.createdFiles != null) {
@@ -579,20 +577,34 @@ public class ChatPanel {
                             if (opResult.runTests) {
                                 if (opResult.testName != null) {
                                     appendSystemMessage("Test execution requested for " + opResult.testName + ". Running tests…");
-                                    scheduleTestRun(model, endpoint, opResult.testName);
+                                    scheduleTestRun(model, endpoint, opResult.testName, taskType);
                                 } else {
                                     appendSystemMessage("Test execution requested. Running tests…");
-                                    scheduleTestRun(model, endpoint, null);
+                                    scheduleTestRun(model, endpoint, null, taskType);
                                 }
                             } else if (opResult.checkCompilation) {
                                 appendSystemMessage("Compilation check requested. Running build…");
-                                scheduleBuildCheck(model, endpoint);
+                                scheduleBuildCheck(model, endpoint, taskType);
                             } else if (opResult.customCommand != null) {
+                                if (taskType == AgentTask.TaskType.GENERATE_TESTS
+                                        && plugin.util.CommandIntentUtil.isStructureInspectionCommand(opResult.customCommand)) {
+                                    recordMistakes(java.util.List.of("no-tree-for-tests"));
+                                    appendSystemMessage("⚠ Structure-inspection command detected during a test-writing task — auto-correcting…");
+                                    history.add(new ChatMessage("user",
+                                            "CORRECTION REQUIRED: You used a directory listing command instead of writing tests. " +
+                                            "Do NOT inspect the tree with EXECUTE_COMMAND. " +
+                                            "Use <CREATE_FILE> or <MODIFY_FILE> to write a Java 21 JUnit 5 test directly. " +
+                                            "If no class is named, choose the most relevant source class from the retrieved context and write its test file now."));
+                                    beginAssistantMessage();
+                                    blinkTimer.start();
+                                    streamAndHandle(model, endpoint, null, false, taskType);
+                                    return;
+                                }
                                 appendSystemMessage("Custom command execution requested: " + opResult.customCommand + ". Running…");
                                 scheduleCustomCommand(opResult.customCommand);
                             } else if (hasFileOps) {
                                 appendSystemMessage("File operations applied. Running build check…");
-                                scheduleBuildCheck(model, endpoint);
+                                scheduleBuildCheck(model, endpoint, taskType);
                             }
 
                             if (fullResponse.contains("<GIT_ADD_NEW")) {
@@ -632,7 +644,7 @@ public class ChatPanel {
                                     "Output ONLY the XML tag with complete Java code inside. No ``` fences, no explanation before the tag."));
                             beginAssistantMessage();
                             blinkTimer.start();
-                            streamAndHandle(model, endpoint, null, false);
+                            streamAndHandle(model, endpoint, null, false, taskType);
                             return;
                         } else {
                             recordMistakes(java.util.List.of("use-xml-tags"));
@@ -682,15 +694,15 @@ public class ChatPanel {
                             if (opResult.runTests) {
                                 if (opResult.testName != null) {
                                     appendSystemMessage("Test execution requested for " + opResult.testName + ". Running tests…");
-                                    scheduleTestRun(model, endpoint, opResult.testName);
+                                    scheduleTestRun(model, endpoint, opResult.testName, taskType);
                                 } else {
                                     appendSystemMessage("Test execution requested. Running tests…");
-                                    scheduleTestRun(model, endpoint, null);
+                                    scheduleTestRun(model, endpoint, null, taskType);
                                 }
                                 return;
                             } else if (opResult.checkCompilation) {
                                 appendSystemMessage("Compilation check requested. Running build…");
-                                scheduleBuildCheck(model, endpoint);
+                                scheduleBuildCheck(model, endpoint, taskType);
                                 return;
                             } else if (opResult.customCommand != null) {
                                 appendSystemMessage("Custom command execution requested: " + opResult.customCommand + ". Running…");
@@ -812,7 +824,7 @@ public class ChatPanel {
     // Utilities
     // -------------------------------------------------------------------------
 
-    private void scheduleBuildCheck(String model, String endpoint) {
+    private void scheduleBuildCheck(String model, String endpoint, AgentTask.TaskType taskType) {
         // Runs after all VFS write actions have been dispatched to the EDT queue
         ApplicationManager.getApplication().invokeLater(() ->
             daemon(() -> {
@@ -830,7 +842,7 @@ public class ChatPanel {
                         if (inTestFixLoop) {
                             inTestFixLoop = false;
                             appendSystemMessage("Compile passed after test fix — re-running tests…");
-                            scheduleTestRun(model, endpoint, testFixName);
+                            scheduleTestRun(model, endpoint, testFixName, taskType);
                         } else {
                             setLoading(false);
                         }
@@ -858,7 +870,7 @@ public class ChatPanel {
                         history.add(new ChatMessage("user", fixInstruction));
                         beginAssistantMessage();
                         blinkTimer.start();
-                        streamAndHandle(model, endpoint, null, false);
+                        streamAndHandle(model, endpoint, null, false, taskType);
                     } else {
                         String errors = result.output();
                         if (errors.length() > 3000) errors = errors.substring(0, 3000) + "\n[...truncated]";
@@ -871,7 +883,7 @@ public class ChatPanel {
         );
     }
 
-    private void scheduleTestRun(String model, String endpoint, String testName) {
+    private void scheduleTestRun(String model, String endpoint, String testName, AgentTask.TaskType taskType) {
         ApplicationManager.getApplication().invokeLater(() ->
             daemon(() -> {
                 BuildUtil.BuildResult result = BuildUtil.runTest(project, testName);
@@ -931,7 +943,7 @@ public class ChatPanel {
                             history.add(new ChatMessage("user", fixInstruction));
                             beginAssistantMessage();
                             blinkTimer.start();
-                            streamAndHandle(model, endpoint, null, false);
+                            streamAndHandle(model, endpoint, null, false, taskType);
                         } else {
                             inTestFixLoop = false;
                             appendSystemMessage("❌ Tests still failing after " +

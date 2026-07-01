@@ -7,6 +7,7 @@ import java.io.InputStreamReader;
 import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.concurrent.TimeUnit;
 
 public class BuildUtil {
@@ -78,15 +79,16 @@ public class BuildUtil {
         if (basePath == null) return new BuildResult(false, "Could not determine project base path.", List.of());
         try {
             boolean isWindows = System.getProperty("os.name").toLowerCase().contains("win");
+            String normalizedCommand = normalizeCustomCommand(command, isWindows);
             List<String> fullCommand = new ArrayList<>();
             if (isWindows) {
                 fullCommand.add("cmd");
                 fullCommand.add("/c");
-                fullCommand.add(command);
+                fullCommand.add(normalizedCommand);
             } else {
                 fullCommand.add("sh");
                 fullCommand.add("-c");
-                fullCommand.add(command);
+                fullCommand.add(normalizedCommand);
             }
 
             Process process = new ProcessBuilder(fullCommand)
@@ -109,6 +111,35 @@ public class BuildUtil {
         } catch (Exception e) {
             return new BuildResult(false, "Command failed to start: " + e.getMessage(), List.of());
         }
+    }
+
+    static String normalizeCustomCommand(String command, boolean isWindows) {
+        if (command == null) return null;
+        String trimmed = command.trim();
+        if (trimmed.isEmpty()) return trimmed;
+
+        if (!trimmed.toLowerCase(Locale.ROOT).startsWith("tree")) {
+            return trimmed;
+        }
+
+        String[] tokens = trimmed.split("\\s+");
+        List<String> pathTokens = new ArrayList<>();
+        for (int i = 1; i < tokens.length; i++) {
+            String token = tokens[i];
+            if (token.equalsIgnoreCase("-a") ||
+                token.equalsIgnoreCase("--noreport") ||
+                token.equalsIgnoreCase("/a") ||
+                token.equalsIgnoreCase("/f")) {
+                continue;
+            }
+            pathTokens.add(token);
+        }
+
+        StringBuilder normalized = new StringBuilder(isWindows ? "tree /F /A" : "tree -a --noreport");
+        for (String token : pathTokens) {
+            normalized.append(' ').append(token);
+        }
+        return normalized.toString();
     }
 
     public static boolean isMavenProject(Project project) {
