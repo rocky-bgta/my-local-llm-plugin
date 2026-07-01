@@ -39,9 +39,9 @@ public class TestGenerator {
                 - Use Mockito for dependencies
                 - Follow AAA pattern (Arrange, Act, Assert)
                 - Test happy path, edge cases, and error conditions
-                - Use package plugin in the test class
-                - Place in src/test/java/plugin/
-                - Use XML tag: <CREATE_FILE path="src/test/java/plugin/""").append(targetClass)
+                - The test package MUST match the source class package
+                - Place the file under the matching src/test/java/<package path>
+                - Use XML tag: <CREATE_FILE path="<test path>/""").append(targetClass)
                 .append("""
                 Test.java">...</CREATE_FILE>
                 """);

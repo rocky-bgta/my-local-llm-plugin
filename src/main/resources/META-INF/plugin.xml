@@ -18,6 +18,7 @@
             id="Local LLM"
             anchor="right"
             secondary="false"
+            icon="/icons/localLlm.svg"
             factoryClass="plugin.toolwindow.ChatToolWindowFactory"/>
 
         <!-- Application-level persistent settings -->

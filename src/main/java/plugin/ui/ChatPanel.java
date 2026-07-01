@@ -3,11 +3,13 @@ package plugin.ui;
 import com.intellij.icons.AllIcons;
 import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.project.Project;
+import com.intellij.openapi.util.Key;
 import com.intellij.ui.content.Content;
 import org.jetbrains.annotations.NotNull;
 import plugin.llm.LocalLLMClient;
 import plugin.llm.model.ChatMessage;
 import plugin.settings.PluginSettings;
+import plugin.agent.AgentTask;
 import plugin.agent.PlannerAgent;
 import plugin.llm.QwenPromptBuilder;
 import plugin.rag.ContextCollector;
@@ -28,8 +30,15 @@ import java.util.List;
 
 public class ChatPanel {
 
+    // Lets actions (e.g. GenerateTestAction) reach the live panel for this project.
+    public static final Key<ChatPanel> PANEL_KEY = Key.create("LocalLLM.ChatPanel");
+
     private final Project project;
     final JPanel root;
+
+    // When set, buildRagContext uses this exact class as the retrieval target
+    // instead of guessing from the query text. Cleared after one use.
+    private String forcedTargetSymbol = null;
 
     // Mode
     private String mode = "PLANNING";
@@ -87,6 +96,7 @@ public class ChatPanel {
 
     public ChatPanel(@NotNull Project project) {
         this.project = project;
+        project.putUserData(PANEL_KEY, this);
         blinkTimer = new Timer(500, e -> toggleBlink());
         blinkTimer.setRepeats(true);
 
@@ -411,6 +421,17 @@ public class ChatPanel {
             return;
         }
 
+        // Auto-switch to EDITING for tasks that require file changes
+        AgentTask.TaskType detectedType = new PlannerAgent().detectTaskType(text);
+        if ("PLANNING".equals(mode) && modeCombo != null
+                && (detectedType == AgentTask.TaskType.GENERATE_TESTS
+                    || detectedType == AgentTask.TaskType.FIX_BUG
+                    || detectedType == AgentTask.TaskType.ADD_FEATURE
+                    || detectedType == AgentTask.TaskType.REFACTOR)) {
+            modeCombo.setSelectedItem("EDITING");
+            appendSystemMessage("Auto-switched to EDITING mode.");
+        }
+
         // Add system message with context if history is empty or it's a new conversation
         if (history.isEmpty()) {
             // Hybrid RAG: retrieve only the most relevant files for this query
@@ -438,7 +459,7 @@ public class ChatPanel {
             // Update mode in system message if it already exists
             ChatMessage first = history.get(0);
             if ("system".equals(first.role())) {
-                String updatedSystemPrompt = first.content().replaceFirst("Current Mode: (PLANNING|EDITING|BYPASS)", "Current Mode: " + mode);
+                String updatedSystemPrompt = first.content().replaceFirst("Mode: (PLANNING|EDITING|BYPASS)", "Mode: " + mode);
                 history.set(0, new ChatMessage("system", updatedSystemPrompt));
             }
         }
@@ -454,9 +475,15 @@ public class ChatPanel {
             }
             history.add(new ChatMessage("user", "Final Part " + chunks.size() + "/" + chunks.size() + ":\n" + chunks.get(chunks.size() - 1)));
         } else {
+            // Inject env info as context before the user query if requested
+            if (detectedType == AgentTask.TaskType.ENV_INFO) {
+                String envInfo = plugin.util.EnvironmentInfoCollector.collect(project);
+                history.add(new ChatMessage("user", "Developer Environment Info:\n" + envInfo));
+                history.add(new ChatMessage("assistant", "Environment information loaded. Ready to help."));
+            }
             history.add(new ChatMessage("user", text));
         }
-        
+
         promptArea.setText("");
 
         beginAssistantMessage();
@@ -1228,7 +1255,10 @@ public class ChatPanel {
                 contextCollector = new ContextCollector(project);
             }
             PlannerAgent planner = new PlannerAgent();
-            String target   = planner.detectTargetSymbol(query);
+            String target   = (forcedTargetSymbol != null && !forcedTargetSymbol.isBlank())
+                    ? forcedTargetSymbol
+                    : planner.detectTargetSymbol(query);
+            forcedTargetSymbol = null;   // one-shot: don't leak into later messages
             String expanded = planner.expandQuery(query);   // BM25 query expansion
             List<RetrievalResult> results = contextCollector.collect(expanded, target, 6);
             if (results.isEmpty()) return "";
@@ -1263,5 +1293,22 @@ public class ChatPanel {
 
     public JPanel getSwingComponent() {
         return root;
+    }
+
+    /**
+     * Entry point for the "Generate Tests for This File" action. Starts a fresh
+     * conversation, pins the exact class as the RAG target (no guessing), switches
+     * to EDITING mode so file ops actually execute, and sends the request.
+     */
+    public void generateTestsFor(String className) {
+        if (className == null || className.isBlank()) return;
+        SwingUtilities.invokeLater(() -> {
+            clearConversation();
+            forcedTargetSymbol = className;
+            if (modeCombo != null) modeCombo.setSelectedItem("EDITING");
+            promptArea.setText("Generate JUnit 5 + Mockito tests for " + className
+                    + ". Mirror the source package and place the test under the matching src/test/java path.");
+            sendMessage();
+        });
     }
 }

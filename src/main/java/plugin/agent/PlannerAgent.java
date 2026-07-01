@@ -22,6 +22,17 @@ public class PlannerAgent {
             "|Repository|Factory|Builder|Test|Panel|Window|Action|Agent|Tool)?)\\b"
     );
 
+    // Capitalised words that match CLASS_MENTION but are command verbs or filler,
+    // not the class under discussion. Without this, "Generate tests for Foo"
+    // resolves the target to "Generate" — so the real class source never gets
+    // retrieved as PSI_PRIMARY and the model writes tests from guesswork.
+    private static final Set<String> COMMAND_WORDS = Set.of(
+            "Generate", "Write", "Create", "Add", "Implement", "Fix", "Make", "Build",
+            "Test", "Tests", "Please", "Update", "Refactor", "Explain", "Document",
+            "Run", "Use", "The", "This", "That", "For", "And", "With", "Class",
+            "Method", "Code", "File", "JUnit", "Mockito", "Java", "New"
+    );
+
     // Task-type → expansion terms added to the BM25 query
     private static final Map<AgentTask.TaskType, String> EXPANSION = Map.of(
             AgentTask.TaskType.GENERATE_TESTS, "test junit mockito assert verify beforeEach",
@@ -29,7 +40,8 @@ public class PlannerAgent {
             AgentTask.TaskType.ADD_FEATURE,     "implement method interface service",
             AgentTask.TaskType.REFACTOR,        "rename extract inline restructure",
             AgentTask.TaskType.EXPLAIN_CODE,    "class method field dependency",
-            AgentTask.TaskType.DOCUMENT,        "javadoc param return throws"
+            AgentTask.TaskType.DOCUMENT,        "javadoc param return throws",
+            AgentTask.TaskType.ENV_INFO,        "environment os java maven shell platform system"
     );
 
     public ExecutionPlan plan(AgentContext ctx) {
@@ -97,6 +109,11 @@ public class PlannerAgent {
 
     public AgentTask.TaskType detectTaskType(String message) {
         String m = message.toLowerCase();
+        if (m.contains("env info") || m.contains("environment info") || m.contains("my environment")
+                || m.contains("system info") || m.contains("platform info") || m.contains("my setup")
+                || (m.contains("give") && m.contains("env")) || (m.contains("send") && m.contains("env"))
+                || (m.contains("show") && m.contains("env")))
+            return AgentTask.TaskType.ENV_INFO;
         if (m.contains("test") || m.contains("spec") || m.contains("junit"))
             return AgentTask.TaskType.GENERATE_TESTS;
         if (m.contains("fix") || m.contains("bug") || m.contains("error") || m.contains("fail"))
@@ -114,6 +131,22 @@ public class PlannerAgent {
 
     public String detectTargetSymbol(String message) {
         Matcher m = CLASS_MENTION.matcher(message);
-        return m.find() ? m.group(1) : "";
+        String firstNonCommand = "";
+        while (m.find()) {
+            String candidate = m.group(1);
+            if (COMMAND_WORDS.contains(candidate)) continue;
+            // An internal capital (LocalLLMClient, ChatPanel) is a strong signal of a
+            // real type name — prefer it over the first plain capitalised word.
+            if (hasInternalUpperCase(candidate)) return candidate;
+            if (firstNonCommand.isEmpty()) firstNonCommand = candidate;
+        }
+        return firstNonCommand;
+    }
+
+    private static boolean hasInternalUpperCase(String s) {
+        for (int i = 1; i < s.length(); i++) {
+            if (Character.isUpperCase(s.charAt(i))) return true;
+        }
+        return false;
     }
 }

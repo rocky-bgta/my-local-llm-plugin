@@ -25,7 +25,10 @@
         <intellij.version.full>2025.2.5</intellij.version.full>
         <intellij.install.dir>C:/Program Files/JetBrains/IntelliJ IDEA ${intellij.version.full}</intellij.install.dir>
         <intellij.lib>${intellij.install.dir}/lib</intellij.lib>
-        <intellij.config.dir>IntelliJIdea${intellij.version}</intellij.config.dir>
+        <!-- The IDE you actually run/restart to load the plugin. Decoupled from the
+             compile-time SDK above because the running IDE may be a newer build. -->
+        <intellij.run.version>2026.1</intellij.run.version>
+        <intellij.config.dir>IntelliJIdea${intellij.run.version}</intellij.config.dir>
         <intellij.plugins.dir>${env.APPDATA}/JetBrains/${intellij.config.dir}/plugins</intellij.plugins.dir>
         <intellij.plugin.install.dir>${intellij.plugins.dir}/${project.artifactId}/lib</intellij.plugin.install.dir>
 

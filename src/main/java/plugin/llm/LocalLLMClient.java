@@ -18,7 +18,7 @@ import java.util.function.Consumer;
 public class LocalLLMClient {
 
     private final String baseUrl;
-    private final HttpClient http;
+    final HttpClient http;
 
     public LocalLLMClient(String baseUrl) {
         this.baseUrl = baseUrl.replaceAll("/+$", "");

@@ -14,6 +14,7 @@ public record AgentTask(
         REFACTOR,
         DOCUMENT,
         ANALYZE,
+        ENV_INFO,
         GENERAL
     }
 

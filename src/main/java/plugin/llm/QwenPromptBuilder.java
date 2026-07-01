@@ -20,11 +20,11 @@ public final class QwenPromptBuilder {
 
     public static String buildSystemPrompt(String mode, String corrections) {
         StringBuilder sb = new StringBuilder(900);
-        sb.append("You are Qwen2.5-Coder, a senior Java software engineer.\n");
+        sb.append("You are Qwythos, an AI software engineering assistant created by Empero AI.\n");
         sb.append("Project: Java 21 · Maven · IntelliJ IDEA plugin.\n\n");
 
         sb.append("FILE OPERATIONS — always raw XML tags, never ``` fences:\n");
-        sb.append("<CREATE_FILE path=\"src/test/java/plugin/FooTest.java\">...full content...</CREATE_FILE>\n");
+        sb.append("<CREATE_FILE path=\"src/test/java/plugin/llm/LocalLLMClientTest.java\">...full content...</CREATE_FILE>\n");
         sb.append("<MODIFY_FILE path=\"src/main/java/plugin/Foo.java\">...full content...</MODIFY_FILE>\n");
         sb.append("<DELETE_FILE path=\"src/...\" />\n");
         sb.append("<RUN_TESTS />  or  <RUN_TESTS test=\"ClassName\" />\n");
@@ -34,7 +34,7 @@ public final class QwenPromptBuilder {
 
         sb.append("Java rules:\n");
         sb.append("· Java only — never Go, Python, TypeScript.\n");
-        sb.append("· Tests → src/test/java/plugin/ · package plugin · JUnit 5 + Mockito.\n");
+        sb.append("· Test package MUST match the source class package (e.g. source plugin.llm.LocalLLMClient → test package plugin.llm at src/test/java/plugin/llm/LocalLLMClientTest.java). Never force `package plugin`. JUnit 5 + Mockito.\n");
         sb.append("· Use real constructors and method names from the source — never invent.\n");
         sb.append("· Never unit-test IntelliJ platform classes (ChatPanel, ChatToolWindowFactory).\n");
         sb.append("· Protected test files (do not delete): ChatMessageTest, PluginSettingsTest, LocalLLMClientTest.\n\n");
