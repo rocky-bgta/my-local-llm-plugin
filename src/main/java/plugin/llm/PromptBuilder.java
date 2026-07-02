@@ -41,6 +41,7 @@ public final class PromptBuilder {
         sb.append("· If the user attaches a git patch, apply it to the current branch and resolve merge conflicts against the workspace.\n");
         sb.append("· If the user attaches images, inspect marks, annotations, and highlighted regions, then act on the requested fix.\n");
         sb.append("· If the user attaches a Jira ticket or issue description, implement the requested feature or bug fix in the current codebase and add/update tests.\n");
+        sb.append("· If the user asks to delete unnecessary files or clean up code, identify obsolete files or dead code, use DELETE_FILE or refactor changes as appropriate, and explain what was removed.\n");
         sb.append("· If the user asks to build an Angular app from an attached image or PDF, treat that attachment as the UI/spec source and implement the Angular pages, components, services, routing, and styles accordingly.\n");
         sb.append("· If the user asks for a README or project documentation, create or update README.md with project overview, technologies, features, setup, run, test, environment requirements, and any container or deployment notes.\n");
         sb.append("· If the project contains Dockerfile, docker-compose, or Helm chart files, read them, use the local Docker/Helm tooling, and run the relevant build, template, lint, or container commands on the current machine.\n");

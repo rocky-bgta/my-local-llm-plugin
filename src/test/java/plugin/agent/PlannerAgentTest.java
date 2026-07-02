@@ -43,4 +43,13 @@ public class PlannerAgentTest {
         assertEquals(AgentTask.TaskType.DOCUMENT,
                 planner.detectTaskType("create a README for this project"));
     }
+
+    @Test
+    void detectsDeleteAndCleanupRequestsAsRefactor() {
+        PlannerAgent planner = new PlannerAgent();
+
+        assertEquals(AgentTask.TaskType.REFACTOR,
+                planner.detectTaskType("delete unnecessary files and cleanup dead code"));
+        assertTrue(planner.expandQuery("cleanup dead code").contains("cleanup"));
+    }
 }

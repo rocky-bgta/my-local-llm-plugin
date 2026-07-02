@@ -39,7 +39,7 @@ public class PlannerAgent {
             AgentTask.TaskType.GENERATE_TESTS, "test assert verify mock edge cases",
             AgentTask.TaskType.FIX_BUG,        "error exception stacktrace fix compile",
             AgentTask.TaskType.ADD_FEATURE,     "implement method interface service",
-            AgentTask.TaskType.REFACTOR,        "rename extract inline restructure",
+            AgentTask.TaskType.REFACTOR,        "rename extract inline restructure cleanup remove delete obsolete unused dead code",
             AgentTask.TaskType.REVIEW_COMMIT,   "code review commit diff jira ticket comments defects",
             AgentTask.TaskType.EXPLAIN_CODE,    "class method field dependency",
             AgentTask.TaskType.DOCUMENT,        "javadoc param return throws readme markdown documentation overview installation usage features requirements",
@@ -150,7 +150,9 @@ public class PlannerAgent {
             return AgentTask.TaskType.DOCUMENT;
         if (m.contains("add") || m.contains("implement") || m.contains("create") || m.contains("feature"))
             return AgentTask.TaskType.ADD_FEATURE;
-        if (m.contains("refactor") || m.contains("clean") || m.contains("rename"))
+        if (m.contains("refactor") || m.contains("clean") || m.contains("cleanup")
+                || m.contains("rename") || m.contains("delete") || m.contains("remove")
+                || m.contains("obsolete") || m.contains("unused") || m.contains("dead code"))
             return AgentTask.TaskType.REFACTOR;
         if ((m.contains("review") || m.contains("code review") || m.contains("commit review"))
                 && (m.contains("commit") || m.contains("change") || m.contains("diff") || m.contains("jira")))
