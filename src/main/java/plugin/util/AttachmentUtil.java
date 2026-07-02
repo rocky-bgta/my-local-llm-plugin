@@ -118,13 +118,33 @@ public final class AttachmentUtil {
         return sb.toString().trim();
     }
 
+    public static boolean containsJavaSourceAttachment(List<AttachmentData> attachments) {
+        if (attachments == null) return false;
+        for (AttachmentData a : attachments) {
+            if (a != null && a.displayName() != null
+                    && a.displayName().toLowerCase(Locale.ROOT).endsWith(".java")
+                    && !LanguageSupportUtil.isTestFile(a.displayName())) return true;
+        }
+        return false;
+    }
+
     public static String buildTaskHint(List<AttachmentData> attachments) {
         if (attachments == null || attachments.isEmpty()) return "";
         boolean hasPatch = containsPatchAttachment(attachments);
         boolean hasImage = containsImageAttachment(attachments);
         boolean hasConflictMarkers = containsMergeConflictMarkers(attachments);
         boolean hasJira = containsJiraTicketAttachment(attachments);
+        boolean hasJavaSource = containsJavaSourceAttachment(attachments);
         StringBuilder sb = new StringBuilder();
+        if (hasJavaSource) {
+            sb.append("The attached file is a Java source class. If the user asks for tests,")
+              .append(" write a compile-ready JUnit 5 test file using the AAA pattern.")
+              .append(" Use ONLY the constructors and methods present in the attached source — do NOT invent overloads.")
+              .append(" Infer the test file path from the source package (e.g. src/main/java/a/b/Foo.java")
+              .append(" → src/test/java/a/b/FooTest.java).")
+              .append(" Return exactly one complete XML tag:")
+              .append(" <CREATE_FILE path=\"src/test/java/...\">full content</CREATE_FILE>.");
+        }
         if (hasPatch) {
             sb.append("Apply the attached git patch to the current branch.");
             sb.append(" If conflicts appear, resolve them against the current workspace and keep the intended changes.");

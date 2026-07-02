@@ -56,7 +56,7 @@ public class LocalLLMClient {
                 .header("Content-Type", "application/json")
                 .header("Accept",       "text/event-stream")
                 .POST(HttpRequest.BodyPublishers.ofByteArray(bytes))
-                .timeout(Duration.ofSeconds(180))
+                .timeout(Duration.ofSeconds(300))
                 .build();
 
         try {
@@ -97,7 +97,7 @@ public class LocalLLMClient {
                 .header("Content-Type", "application/json")
                 .header("Accept",       "text/event-stream")
                 .POST(HttpRequest.BodyPublishers.ofByteArray(bytes))
-                .timeout(Duration.ofSeconds(180))
+                .timeout(Duration.ofSeconds(300))
                 .build();
 
         try {
@@ -130,8 +130,9 @@ public class LocalLLMClient {
 
     private JsonObject buildBody(String model, List<ChatMessage> messages, List<AttachmentData> attachments) {
         JsonObject body = new JsonObject();
-        body.addProperty("model",  model);
-        body.addProperty("stream", true);
+        body.addProperty("model",      model);
+        body.addProperty("stream",     true);
+        body.addProperty("max_tokens", 4096);
 
         JsonArray msgs = new JsonArray();
         int lastIndex = messages == null ? -1 : messages.size() - 1;

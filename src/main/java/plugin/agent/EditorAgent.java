@@ -14,10 +14,10 @@ public class EditorAgent {
         Project project = ctx.getProject();
         FileOperationUtil.FileOpResult result = FileOperationUtil.processFileOperations(project, response);
 
-        if (result.createdFiles != null) {
-            result.createdFiles.forEach(f -> ctx.getWorkingMemory().trackModifiedFile(f));
+        if (result.appliedFiles != null) {
+            result.appliedFiles.forEach(f -> ctx.getWorkingMemory().trackModifiedFile(f));
         }
-        boolean hasChanges = (result.createdFiles != null && !result.createdFiles.isEmpty())
+        boolean hasChanges = (result.appliedFiles != null && !result.appliedFiles.isEmpty())
                 || (result.warnings != null && !result.warnings.isEmpty());
         ctx.setEditApplied(hasChanges);
 
@@ -27,7 +27,8 @@ public class EditorAgent {
     private FileOperationUtil.FileOpResult emptyResult() {
         return new FileOperationUtil.FileOpResult(
                 false, false, null, null,
-                new java.util.ArrayList<>(), new java.util.ArrayList<>(), new java.util.ArrayList<>()
+                new java.util.ArrayList<>(), new java.util.ArrayList<>(), new java.util.ArrayList<>(),
+                new java.util.ArrayList<>(), new java.util.ArrayList<>()
         );
     }
 }

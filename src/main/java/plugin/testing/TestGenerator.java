@@ -14,6 +14,7 @@ public class TestGenerator {
         LanguageSupportUtil.Language language = LanguageSupportUtil.detectPrimaryLanguage(ctx.getProject());
         List<MethodFinder.MethodInfo> methods = List.of();
         List<ClassFinder.ClassInfo> related = List.of();
+        String inferredTestPath = inferTestPath(targetClass);
 
         if (LanguageSupportUtil.isJvmLanguage(language)) {
             ClassFinder classFinder = new ClassFinder(ctx.getProject());
@@ -39,16 +40,15 @@ public class TestGenerator {
             prompt.append("\n");
         }
 
-        prompt.append("""
-                Requirements:
-                - Use the project's native test framework
-                - Follow the language's usual testing style and conventions
-                - Test happy path, edge cases, and error conditions
-                - Place the file under the matching test location for the detected language
-                - Use XML tag: <CREATE_FILE path="<test path>/""").append(targetClass)
-                .append("""
-                Test">...</CREATE_FILE>
-                """);
+        prompt.append("Requirements:\n")
+                .append("- Use the project's native test framework\n")
+                .append("- Follow the language's usual testing style and conventions\n")
+                .append("- Use the AAA pattern in each test: Arrange, Act, Assert\n")
+                .append("- Test happy path, edge cases, and error conditions\n")
+                .append("- Place the file at ").append(inferredTestPath).append("\n")
+                .append("- Use one complete XML tag only: <CREATE_FILE path=\"")
+                .append(inferredTestPath)
+                .append("\">...full content...</CREATE_FILE>\n");
 
         return prompt.toString();
     }
@@ -58,6 +58,6 @@ public class TestGenerator {
     }
 
     public String inferTestPath(String targetClass) {
-        return LanguageSupportUtil.suggestedTestPath("src/main/java/" + targetClass + ".java");
+        return LanguageSupportUtil.suggestedTestPath("src/main/java/" + targetClass.replace('.', '/') + ".java");
     }
 }

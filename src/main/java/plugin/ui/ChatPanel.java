@@ -32,11 +32,14 @@ import java.awt.event.KeyAdapter;
 import java.awt.event.KeyEvent;
 import java.awt.datatransfer.DataFlavor;
 import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 public class ChatPanel implements com.intellij.openapi.Disposable {
 
@@ -98,7 +101,13 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
 
     private volatile boolean isGenerating = false;
     private volatile boolean stopRequested = false;
+    private volatile boolean panelDisposed = false;
     private Thread currentChatThread;
+
+    // Streaming file-write state — reset at the start of each new generation
+    private int streamScanOffset = 0;
+    private final Set<String> streamWrittenPaths = new HashSet<>();
+    private AgentTask.TaskType currentTaskType = AgentTask.TaskType.GENERAL;
 
     // Streaming state (all accessed on EDT only)
     private final Timer         blinkTimer;
@@ -115,6 +124,7 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
 
     // Track newly created files for Git
     private final List<String> newlyCreatedFiles = new ArrayList<>();
+    private final Map<String, FileOperationUtil.FileSnapshot> generatedTestSnapshots = new LinkedHashMap<>();
 
     // Attachments dropped by the user for the next prompt
     private final List<AttachmentData> pendingAttachments = new ArrayList<>();
@@ -175,6 +185,7 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
     public int getBuildFixAttempts() { return buildFixAttempts; }
     public List<ChatMessage> getHistory() { return history; }
     public List<String> getNewlyCreatedFiles() { return newlyCreatedFiles; }
+    Map<String, FileOperationUtil.FileSnapshot> getGeneratedTestSnapshots() { return generatedTestSnapshots; }
     public Style getUserRoleStyle() { return userRoleStyle; }
     public Style getUserTextStyle() { return userTextStyle; }
     public Style getAssistantRoleStyle() { return assistantRoleStyle; }
@@ -236,15 +247,18 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
         clearContextBtn.setToolTipText("Clear chat display and reset conversation context (Ctrl+Shift+N)");
         clearContextBtn.addActionListener(e -> clearConversation());
 
-        JButton gearBtn = new JButton("Settings", AllIcons.General.Settings);
+        JButton gearBtn = new JButton(AllIcons.General.Settings);
         gearBtn.setToolTipText("Open settings for local LLM URL, model, MCP, GitLab, and Jira");
         gearBtn.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
         gearBtn.setFocusable(false);
-        gearBtn.setMargin(new Insets(3, 10, 3, 10));
-        gearBtn.setHorizontalTextPosition(SwingConstants.RIGHT);
-        gearBtn.setVerticalTextPosition(SwingConstants.CENTER);
-        gearBtn.setIconTextGap(6);
-        gearBtn.setPreferredSize(new Dimension(128, 28));
+        gearBtn.setBorderPainted(false);
+        gearBtn.setContentAreaFilled(false);
+        gearBtn.setOpaque(false);
+        gearBtn.setFocusPainted(false);
+        gearBtn.setMargin(new Insets(2, 2, 2, 2));
+        gearBtn.setPreferredSize(new Dimension(24, 24));
+        gearBtn.setMinimumSize(new Dimension(24, 24));
+        gearBtn.setMaximumSize(new Dimension(24, 24));
         gearBtn.addActionListener(e -> showSettingsDialog());
 
         JPanel headerRow = new JPanel(new BorderLayout(8, 0));
@@ -256,7 +270,11 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
         headerLeft.add(new JLabel("Mode:"));
         headerLeft.add(modeCombo);
         headerLeft.add(clearContextBtn);
+        JPanel headerRight = new JPanel(new FlowLayout(FlowLayout.RIGHT, 0, 0));
+        headerRight.setOpaque(false);
+        headerRight.add(gearBtn);
         headerRow.add(headerLeft, BorderLayout.WEST);
+        headerRow.add(headerRight, BorderLayout.EAST);
 
         JPanel statusRow = new JPanel(new BorderLayout(8, 0));
         statusRow.setOpaque(false);
@@ -267,11 +285,7 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
         statusLeft.add(contextBar);
         statusLeft.add(fileHistoryLabel);
         statusLeft.add(gitStatusLabel);
-        JPanel statusRight = new JPanel(new FlowLayout(FlowLayout.RIGHT, 0, 0));
-        statusRight.setOpaque(false);
-        statusRight.add(gearBtn);
         statusRow.add(statusLeft, BorderLayout.WEST);
-        statusRow.add(statusRight, BorderLayout.EAST);
 
         bar.add(headerRow);
         bar.add(Box.createVerticalStrut(4));
@@ -843,6 +857,7 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
 
         recordPromptHistory(text);
         newlyCreatedFiles.clear();
+        clearGeneratedTestSnapshots();
         buildFixAttempts       = 0;
         lastCompileFingerprint = "";
         lastTestFingerprint    = "";
@@ -1021,10 +1036,15 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
         currentChatThread = new Thread(() -> {
             try {
                 stopRequested = false;
+                streamScanOffset = 0;
+                streamWrittenPaths.clear();
+                currentTaskType = taskType;
                 new LocalLLMClient(endpoint).streamChat(model, finalSnapshot, attachments,
                         token -> {
                             if (stopRequested) throw new RuntimeException("STREAM_INTERRUPTED");
-                            SwingUtilities.invokeLater(() -> appendToken(token));
+                            if (!panelDisposed) {
+                                SwingUtilities.invokeLater(() -> appendToken(token));
+                            }
                         });
                 SwingUtilities.invokeLater(() -> {
                     finalizeAssistantMessage();
@@ -1102,7 +1122,9 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
                             blinkTimer.start();
                             streamAndHandle(model, endpoint, null, false, taskType, attachments);
                         } else if (hasFileOps || hasTests || hasCustomCommand) {
-                            FileOperationUtil.FileOpResult opResult = FileOperationUtil.processFileOperations(project, fullResponse);
+                            FileOperationUtil.FileOpResult opResult = FileOperationUtil.processFileOperations(project, fullResponse, streamWrittenPaths);
+                            trackGeneratedTestSnapshots(opResult, taskType);
+                            boolean changesApplied = opResult.appliedFiles != null && !opResult.appliedFiles.isEmpty();
                             if (opResult.createdFiles != null) {
                                 newlyCreatedFiles.addAll(opResult.createdFiles);
                             }
@@ -1112,6 +1134,42 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
                             }
                             recordMistakes(opResult.mistakeKeys);
                             refreshVersionControlStatus();
+                            if (hasFileOps && !changesApplied) {
+                                rollbackGeneratedTestWrites("No corrected test file was applied; restored generated-test writes from before this request.");
+                                if (taskType == AgentTask.TaskType.GENERATE_TESTS && canRetry) {
+                                    boolean wasTruncated = opResult.mistakeKeys != null
+                                            && opResult.mistakeKeys.contains("truncated-response");
+                                    if (wasTruncated) {
+                                        appendSystemMessage("⚠ LLM response was cut off before the closing tag — asking it to resend a shorter file…");
+                                        history.add(new ChatMessage("user", buildTruncatedResponseCorrection(userText, attachments)));
+                                    } else {
+                                        appendSystemMessage("⚠ Generated-test write was blocked — auto-correcting with stricter test-file instructions…");
+                                        history.add(new ChatMessage("user", buildGeneratedTestFileCorrection(userText, attachments)));
+                                    }
+                                    beginAssistantMessage();
+                                    blinkTimer.start();
+                                    streamAndHandle(model, endpoint, null, false, taskType, attachments);
+                                    return;
+                                }
+                                appendSystemMessage("No file changes were applied, so no build or test run started. Please resend a complete XML file-operation tag with a valid path and full file content.");
+                                return;
+                            }
+                            if (taskType == AgentTask.TaskType.GENERATE_TESTS && changesApplied && !hasAppliedTestFile(opResult)) {
+                                rollbackGeneratedTestWrites("The model changed production files without writing a test file; restored generated-test writes from before this request.");
+                                if (opResult.appliedFiles != null) {
+                                    newlyCreatedFiles.removeAll(opResult.appliedFiles);
+                                }
+                                if (canRetry) {
+                                    appendSystemMessage("⚠ Model wrote source code instead of a test — auto-correcting…");
+                                    history.add(new ChatMessage("user", buildGeneratedTestFileCorrection(userText, attachments)));
+                                    beginAssistantMessage();
+                                    blinkTimer.start();
+                                    streamAndHandle(model, endpoint, null, false, taskType, attachments);
+                                    return;
+                                }
+                                appendSystemMessage("No test file was written. Please resend a complete XML tag for the matching *Test file.");
+                                return;
+                            }
                             if (opResult.runTests) {
                                 appendSystemMessage("File operations applied. Running build check before tests…");
                                 refreshTelemetry("Debugging", finalSnapshot);
@@ -1173,21 +1231,23 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
                             appendSystemMessage("⚠ Model did not use XML tags — auto-correcting…");
                             history.add(new ChatMessage("user",
                                     correction +
-                                    "You MUST re-send your response as a raw XML tag with real code inside it. " +
+                                    "You MUST re-send your response as a single complete raw XML tag with real code inside it. " +
                                     "Use the project's detected language and test framework. " +
-                                    "Do not use markdown fences or plain text. Output ONLY the XML tag."));
+                                    "Include both the opening and closing tags, and include the full file content between them. " +
+                                    "Do not use markdown fences, plain text, or stop after the first line. Output ONLY the XML tag."));
                             beginAssistantMessage();
                             blinkTimer.start();
                             streamAndHandle(model, endpoint, null, false, taskType, attachments);
                             return;
                         } else {
                             recordMistakes(java.util.List.of("use-xml-tags"));
+                            rollbackGeneratedTestWrites("No file-operation fix was produced; restored generated-test writes from before this request.");
                             appendSystemMessage("No file operation tags found — no files were changed. " +
                                     "A correction has been injected. Please ask again.");
                             // Always inject — covers plain-text responses AND post-retry failures
                             history.add(new ChatMessage("user",
                                     "CORRECTION REQUIRED: Your last response still did not write any files. " +
-                                    "You MUST output a raw XML tag with complete code inside it. " +
+                                    "You MUST output a raw XML tag with complete code inside it, including both opening and closing tags. " +
                                     "Use the detected language and the appropriate test framework or file conventions. " +
                                     "Output ONLY the XML tag — no ``` fences, no explanation before it."));
                             history.add(new ChatMessage("assistant",
@@ -1217,13 +1277,20 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
                         }
 
                         if (fullResponse.contains("<RUN_TESTS") || fullResponse.contains("<CHECK_COMPILATION") || fullResponse.contains("<EXECUTE_COMMAND")) {
-                            FileOperationUtil.FileOpResult opResult = FileOperationUtil.processFileOperations(project, fullResponse);
+                            FileOperationUtil.FileOpResult opResult = FileOperationUtil.processFileOperations(project, fullResponse, streamWrittenPaths);
+                            trackGeneratedTestSnapshots(opResult, taskType);
+                            boolean changesApplied = opResult.appliedFiles != null && !opResult.appliedFiles.isEmpty();
                             if (opResult.warnings != null && !opResult.warnings.isEmpty()) {
                                 opResult.warnings.forEach(this::appendSystemMessage);
                                 injectBlockedWriteFeedback(opResult.warnings);
                             }
                             recordMistakes(opResult.mistakeKeys);
                             refreshVersionControlStatus();
+                            if (hasFileOps && !changesApplied) {
+                                rollbackGeneratedTestWrites("No corrected test file was applied; restored generated-test writes from before this request.");
+                                appendSystemMessage("No file changes were applied, so no build or test run started. Please resend a complete XML file-operation tag with a valid path and full file content.");
+                                return;
+                            }
                             if (opResult.runTests) {
                                 appendSystemMessage("File operations applied. Running build check before tests…");
                                 refreshTelemetry("Testing", finalSnapshot);
@@ -1347,6 +1414,31 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
         insert("▌", cursorStyle);
         cursorOn = true;
         chatPane.setCaretPosition(chatDoc.getLength());
+        if ("EDITING".equals(mode)) {
+            applyStreamingFileOps();
+        }
+    }
+
+    private void applyStreamingFileOps() {
+        List<FileOperationUtil.StreamFileOp> ops =
+                FileOperationUtil.pollCompleteFileOps(assistantBuffer.toString(), streamScanOffset);
+        for (FileOperationUtil.StreamFileOp op : ops) {
+            if (streamWrittenPaths.contains(op.path())) continue;
+            streamScanOffset = op.endOffset();
+            FileOperationUtil.FileOpResult result = FileOperationUtil.applyStreamedFileOp(project, op);
+            // Collect paths that were actually written (post-auto-correct)
+            if (result.appliedFiles != null) streamWrittenPaths.addAll(result.appliedFiles);
+            else streamWrittenPaths.add(op.path()); // mark attempted even if blocked
+            if (result.createdFiles != null) newlyCreatedFiles.addAll(result.createdFiles);
+            if (result.warnings != null && !result.warnings.isEmpty()) {
+                result.warnings.forEach(this::appendSystemMessage);
+                injectBlockedWriteFeedback(result.warnings);
+            }
+            trackGeneratedTestSnapshots(result, currentTaskType);
+            if (result.appliedFiles != null && !result.appliedFiles.isEmpty()) {
+                appendSystemMessage("⚡ Written during stream: " + result.appliedFiles);
+            }
+        }
     }
 
     private void finalizeAssistantMessage() {
@@ -1399,6 +1491,96 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
     // Utilities
     // -------------------------------------------------------------------------
 
+    private void trackGeneratedTestSnapshots(FileOperationUtil.FileOpResult opResult, AgentTask.TaskType taskType) {
+        if (taskType != AgentTask.TaskType.GENERATE_TESTS
+                || opResult == null
+                || opResult.fileSnapshots == null
+                || opResult.fileSnapshots.isEmpty()) {
+            return;
+        }
+        for (FileOperationUtil.FileSnapshot snapshot : opResult.fileSnapshots) {
+            if (snapshot == null || snapshot.path() == null || snapshot.path().isBlank()) continue;
+            generatedTestSnapshots.putIfAbsent(snapshot.path(), snapshot);
+        }
+    }
+
+    private void clearGeneratedTestSnapshots() {
+        generatedTestSnapshots.clear();
+    }
+
+    private void rollbackGeneratedTestWrites(String reason) {
+        if (generatedTestSnapshots.isEmpty()) return;
+
+        List<String> restored = FileOperationUtil.restoreFileSnapshots(project, new ArrayList<>(generatedTestSnapshots.values()));
+        clearGeneratedTestSnapshots();
+        refreshVersionControlStatus();
+        if (!restored.isEmpty()) {
+            appendSystemMessage("⚠ " + reason + "\nRestored files:\n- " + String.join("\n- ", restored));
+        }
+    }
+
+    private boolean hasAppliedTestFile(FileOperationUtil.FileOpResult opResult) {
+        if (opResult == null || opResult.appliedFiles == null) return false;
+        return opResult.appliedFiles.stream().anyMatch(plugin.util.LanguageSupportUtil::isTestFile);
+    }
+
+    private String buildGeneratedTestFileCorrection(String userText, List<AttachmentData> attachments) {
+        String expectedPath = expectedTestPathFromAttachments(attachments);
+        String targetLine = expectedPath == null || expectedPath.isBlank()
+                ? "Infer the matching test path from the attached/current source file."
+                : "Write the test at exactly `" + expectedPath + "`.";
+        return """
+                CORRECTION REQUIRED: The previous response did not write a valid unit test file.
+                Do not modify src/main/java production files unless a minimal test seam is absolutely required and a test file is written in the same response.
+                %s
+                Use the project's JUnit 5 setup and AAA pattern in each test: Arrange, Act, Assert.
+                For IntelliJ AnAction classes, do not instantiate, subclass, or implement AnActionEvent; do not create fake IntelliJ classes such as ProjectDelegate; do not mock static IntelliJ services such as ToolWindowManager.getInstance(project). Prefer package-private helper methods or protected overrides from the source.
+                Return exactly one complete raw XML tag: <CREATE_FILE path="<test path>">complete compile-ready test content</CREATE_FILE>.
+                If the test file already exists, use <MODIFY_FILE> with the complete corrected content.
+                Output only the XML tag.
+                """.formatted(targetLine).trim();
+    }
+
+    private String buildTruncatedResponseCorrection(String userText, List<AttachmentData> attachments) {
+        String expectedPath = expectedTestPathFromAttachments(attachments);
+        String targetLine = expectedPath == null || expectedPath.isBlank()
+                ? "Infer the matching test path from the attached/current source file."
+                : "Write the test at exactly `" + expectedPath + "`.";
+        return """
+                CORRECTION REQUIRED: Your previous response was cut off — the closing XML tag was missing and the file was NOT written.
+                You must resend the complete file from scratch in a single response.
+                %s
+                Keep the test file SHORT: write at most 8 focused tests. Skip trivial getters and long setup blocks.
+                Use the project's JUnit 5 setup and the AAA pattern: Arrange, Act, Assert.
+                Return exactly one complete raw XML tag with both the opening AND closing tag:
+                <CREATE_FILE path="<test path>">complete compile-ready test content</CREATE_FILE>
+                If the test file already exists, use <MODIFY_FILE> instead.
+                Output only the XML tag — nothing else.
+                """.formatted(targetLine).trim();
+    }
+
+    private String expectedTestPathFromAttachments(List<AttachmentData> attachments) {
+        if (attachments == null || attachments.isEmpty()) return "";
+        Path basePath = project.getBasePath() == null ? null : Paths.get(project.getBasePath()).toAbsolutePath().normalize();
+        for (AttachmentData attachment : attachments) {
+            if (attachment == null || attachment.path() == null) continue;
+            String sourcePath = attachment.path().toString().replace("\\", "/");
+            try {
+                Path absoluteSourcePath = attachment.path().toAbsolutePath().normalize();
+                if (basePath != null && absoluteSourcePath.startsWith(basePath)) {
+                    sourcePath = basePath.relativize(absoluteSourcePath).toString().replace("\\", "/");
+                }
+            } catch (RuntimeException ignored) {
+                // Use attachment path text as-is.
+            }
+            if (plugin.util.LanguageSupportUtil.isSourceFile(sourcePath)
+                    && !plugin.util.LanguageSupportUtil.isTestFile(sourcePath)) {
+                return plugin.util.LanguageSupportUtil.suggestedTestPath(sourcePath);
+            }
+        }
+        return "";
+    }
+
     private void scheduleBuildCheck(String model, String endpoint, AgentTask.TaskType taskType,
                                     boolean runTestsAfterBuild, String testNameAfterBuild) {
         refreshTelemetry("Debugging", null);
@@ -1425,6 +1607,9 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
                             appendSystemMessage("Build passed — running tests…");
                             scheduleTestRun(model, endpoint, testNameAfterBuild, taskType);
                         } else {
+                            if (taskType == AgentTask.TaskType.GENERATE_TESTS) {
+                                clearGeneratedTestSnapshots();
+                            }
                             setLoading(false);
                         }
                     } else if (buildFixAttempts < AutoFixLoop.MAX_COMPILE_ATTEMPTS) {
@@ -1457,6 +1642,7 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
                         if (errors.length() > 3000) errors = errors.substring(0, 3000) + "\n[...truncated]";
                         appendSystemMessage("❌ Build failed after " +
                                 AutoFixLoop.MAX_COMPILE_ATTEMPTS + " attempts:\n" + errors);
+                        rollbackGeneratedTestWrites("Build validation failed after auto-fix attempts; restored generated-test writes from before this request.");
                         setLoading(false);
                     }
                 });
@@ -1479,6 +1665,9 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
                 SwingUtilities.invokeLater(() -> {
                     if (result.success()) {
                         appendSystemMessage("✓ Tests passed successfully.");
+                        if (taskType == AgentTask.TaskType.GENERATE_TESTS) {
+                            clearGeneratedTestSnapshots();
+                        }
                         setLoading(false);
                     } else {
                         appendSystemMessage("❌ Tests failed.");
@@ -1532,6 +1721,7 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
                             inTestFixLoop = false;
                             appendSystemMessage("❌ Tests still failing after " +
                                     AutoFixLoop.MAX_TEST_ATTEMPTS + " attempts.");
+                            rollbackGeneratedTestWrites("Test validation failed after auto-fix attempts; restored generated-test writes from before this request.");
                             setLoading(false);
                         }
                     }
@@ -1798,6 +1988,7 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
     private void clearConversation() {
         history.clear();
         newlyCreatedFiles.clear();
+        clearGeneratedTestSnapshots();
         pendingAttachments.clear();
         estimatedInputTokens = 0;
         estimatedOutputTokens = 0;
@@ -1831,10 +2022,11 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
 
     @Override
     public void dispose() {
-        stopRequested = true;
-        if (currentChatThread != null && currentChatThread.isAlive()) {
-            currentChatThread.interrupt();
-        }
+        panelDisposed = true;
+        // Don't set stopRequested or interrupt currentChatThread here.
+        // The thread is a daemon — it will complete its generation (and apply any file operations)
+        // or die with the JVM on project close. Interrupting it causes a premature HTTP disconnect
+        // that leaves the LLM mid-generation and truncates file output.
         blinkTimer.stop();
         statusPulseTimer.stop();
         if (contextCollector != null) {
@@ -2180,7 +2372,9 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
                     Do not output a shell command, generic example, test plan, or clarifying question.
                     Use the project's detected language and test framework.
                     If you are writing a unit test for a single source file, infer the matching test path from the repository layout and write that exact file.
-                    If the package folders are missing, create them in the file-operation path.
+                    Use the AAA pattern in each test: Arrange, Act, Assert.
+                    For IntelliJ AnAction classes, do not instantiate, subclass, or implement AnActionEvent; do not create fake IntelliJ classes such as ProjectDelegate; do not mock static IntelliJ services such as ToolWindowManager.getInstance(project). Prefer package-private helper methods or protected overrides from the source.
+                    If the package folders are missing, create them in the file-operation path. If the test file already exists, modify it instead of creating a duplicate.
                     Create the file with a raw <CREATE_FILE> tag and complete content. %s
                     Output only the required XML file-operation tag with complete content.
                     """.formatted(targetNote).trim();
@@ -2412,18 +2606,74 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
     }
 
     /**
+     * Extracts only the public constructor and method signature lines from the source
+     * file (no bodies, no imports).  Keeping this compact (< 300 chars) avoids bloating
+     * the input for reasoning models that spend many tokens on chain-of-thought.
+     */
+    private static String readSourceSnippet(String sourceFilePath) {
+        if (sourceFilePath == null || sourceFilePath.isBlank()) return "";
+        try {
+            String content = java.nio.file.Files.readString(
+                    Paths.get(sourceFilePath), java.nio.charset.StandardCharsets.UTF_8);
+            StringBuilder sig = new StringBuilder();
+            for (String raw : content.split("\\r?\\n")) {
+                String t = raw.trim();
+                // Match public constructor/method declarations; strip the opening brace onward
+                if (t.startsWith("public ") && t.contains("(")) {
+                    sig.append("  ").append(t.replaceAll("\\s*\\{.*", "").trim()).append("\n");
+                }
+            }
+            if (sig.length() == 0) return "";
+            return "\nPublic method signatures (use ONLY these — do NOT invent overloads):\n"
+                    + sig.toString();
+        } catch (Exception ignored) {
+            return "";
+        }
+    }
+
+    /**
      * Entry point for the "Generate Tests for This File" action. Starts a fresh
      * conversation, pins the exact class as the RAG target (no guessing), switches
      * to EDITING mode so file ops actually execute, and sends the request.
      */
-    public void generateTestsFor(String className) {
+    public void generateTestsFor(String sourceFilePath, String className) {
         if (className == null || className.isBlank()) return;
         SwingUtilities.invokeLater(() -> {
             clearConversation();
             forcedTargetSymbol = className;
             if (modeCombo != null) modeCombo.setSelectedItem("EDITING");
-            promptArea.setText("Generate tests for " + className
-                    + " using the project's detected language and test framework. Place the file in the matching test location.");
+            String relativeSourcePath = sourceFilePath;
+            String suggestedTestPath = "";
+            if (sourceFilePath != null && !sourceFilePath.isBlank()) {
+                try {
+                    Path sourcePath = Paths.get(sourceFilePath).toAbsolutePath().normalize();
+                    Path basePath = project.getBasePath() == null ? null : Paths.get(project.getBasePath()).toAbsolutePath().normalize();
+                    if (basePath != null && sourcePath.startsWith(basePath)) {
+                        relativeSourcePath = basePath.relativize(sourcePath).toString().replace("\\", "/");
+                    }
+                } catch (Exception ignored) {
+                    // Use the provided path as-is if it cannot be relativized.
+                }
+                suggestedTestPath = plugin.util.LanguageSupportUtil.suggestedTestPath(relativeSourcePath);
+            }
+            if (suggestedTestPath.isBlank()) {
+                suggestedTestPath = "src/test/java/" + className + "Test.java";
+            }
+
+            String sourceSnippet = readSourceSnippet(sourceFilePath);
+            promptArea.setText("Generate a compile-ready test for " + className + ". "
+                    + (relativeSourcePath == null || relativeSourcePath.isBlank()
+                        ? ""
+                        : "Source file: " + relativeSourcePath + ". ")
+                    + "Write the actual test file at " + suggestedTestPath + ". "
+                    + sourceSnippet
+                    + "Use ONLY the constructors and methods that appear in the source above — do NOT invent overloads. "
+                    + "Use the project's detected language and test framework. "
+                    + "Use the AAA pattern in each test: Arrange, Act, Assert. "
+                    + "Keep it concise: at most 8 focused tests, no comments, no verbose setup. "
+                    + "Return one complete XML tag only — include both opening and closing tags: "
+                    + "<CREATE_FILE path=\"" + suggestedTestPath + "\">...full content...</CREATE_FILE>. "
+                    + "If the test file already exists, use <MODIFY_FILE> instead.");
             sendMessage();
         });
     }

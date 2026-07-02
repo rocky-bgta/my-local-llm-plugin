@@ -11,9 +11,13 @@ public class OpenChatAction extends AnAction {
 
     @Override
     public void actionPerformed(@NotNull AnActionEvent e) {
-        Project project = e.getProject();
-        if (project == null) return;
-        showToolWindow(project);
+        openChat(e.getProject());
+    }
+
+    void openChat(Project project) {
+        if (project != null) {
+            showToolWindow(project);
+        }
     }
 
     protected void showToolWindow(@NotNull Project project) {
@@ -23,6 +27,10 @@ public class OpenChatAction extends AnAction {
 
     @Override
     public void update(@NotNull AnActionEvent e) {
-        e.getPresentation().setEnabled(e.getProject() != null);
+        e.getPresentation().setEnabled(isEnabled(e.getProject()));
+    }
+
+    boolean isEnabled(Project project) {
+        return project != null;
     }
 }

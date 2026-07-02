@@ -27,7 +27,7 @@ public class GenerateTestAction extends AnAction {
         // so the panel is registered in project user data by the time we read it.
         toolWindow.show(() -> {
             ChatPanel panel = project.getUserData(ChatPanel.PANEL_KEY);
-            if (panel != null) panel.generateTestsFor(className);
+            if (panel != null) panel.generateTestsFor(file.getPath(), className);
         });
     }
 

@@ -14,25 +14,32 @@ public class ExplainCodeAction extends AnAction {
 
     @Override
     public void actionPerformed(@NotNull AnActionEvent e) {
-        Project project = e.getProject();
-        Editor editor = e.getData(CommonDataKeys.EDITOR);
+        explainSelectedCode(e.getProject(), e.getData(CommonDataKeys.EDITOR));
+    }
+
+    void explainSelectedCode(Project project, Editor editor) {
         if (project == null || editor == null) return;
 
         SelectionModel selection = editor.getSelectionModel();
         String selectedText = selection.getSelectedText();
         if (selectedText == null || selectedText.isBlank()) return;
 
+        showToolWindow(project);
+    }
+
+    protected void showToolWindow(@NotNull Project project) {
         ToolWindow toolWindow = ToolWindowManager.getInstance(project).getToolWindow("Local LLM");
         if (toolWindow != null) {
             toolWindow.show(null);
-            // ChatPanel will pick up the selected text via EditorContextUtil if needed
         }
     }
 
     @Override
     public void update(@NotNull AnActionEvent e) {
-        Editor editor = e.getData(CommonDataKeys.EDITOR);
-        boolean hasSelection = editor != null && editor.getSelectionModel().hasSelection();
-        e.getPresentation().setEnabled(hasSelection);
+        e.getPresentation().setEnabled(isEnabled(e.getData(CommonDataKeys.EDITOR)));
+    }
+
+    boolean isEnabled(Editor editor) {
+        return editor != null && editor.getSelectionModel().hasSelection();
     }
 }

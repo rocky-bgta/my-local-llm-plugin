@@ -41,6 +41,11 @@ public class PromptBuilderTest {
         assertTrue(editingPrompt.contains("create them in the file operation path"));
         assertTrue(editingPrompt.contains("do not emit RUN_TESTS or EXECUTE_COMMAND tags in normal answers"));
         assertTrue(editingPrompt.contains("The client handles test execution and terminal commands"));
+        assertTrue(editingPrompt.contains("do not instantiate, subclass, or implement AnActionEvent"));
+        assertTrue(editingPrompt.contains("Do not create fake IntelliJ interfaces/classes"));
+        assertTrue(editingPrompt.contains("Do not write placeholder code"));
+        assertTrue(editingPrompt.contains("avoid direct AnActionEvent construction"));
+        assertTrue(editingPrompt.contains("AAA pattern"));
         assertTrue(planningPrompt.contains("do not wrap output in <PLAN> tags"));
         assertTrue(!editingPrompt.contains("<RUN_TESTS"));
         assertTrue(!editingPrompt.contains("<EXECUTE_COMMAND"));

@@ -20,7 +20,7 @@ public class ApplyChanges {
         FileOperationUtil.FileOpResult opResult = FileOperationUtil.processFileOperations(
                 project, llmResponse);
 
-        List<String> applied = opResult.createdFiles != null ? new ArrayList<>(opResult.createdFiles) : new ArrayList<>();
+        List<String> applied = opResult.appliedFiles != null ? new ArrayList<>(opResult.appliedFiles) : new ArrayList<>();
         List<String> warnings = opResult.warnings != null ? new ArrayList<>(opResult.warnings) : new ArrayList<>();
 
         return new ApplyResult(applied, warnings, opResult.runTests, opResult.testName);
