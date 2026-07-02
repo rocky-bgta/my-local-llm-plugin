@@ -42,6 +42,7 @@ public class PlannerAgent {
             AgentTask.TaskType.REFACTOR,        "rename extract inline restructure cleanup remove delete obsolete unused dead code",
             AgentTask.TaskType.REVIEW_COMMIT,   "code review commit diff jira ticket comments defects",
             AgentTask.TaskType.EXPLAIN_CODE,    "class method field dependency",
+            AgentTask.TaskType.ANALYZE,         "architecture project understanding dependency graph build system framework entry point modules external services database message broker test framework security performance screenshot current file related files",
             AgentTask.TaskType.DOCUMENT,        "javadoc param return throws readme markdown documentation overview installation usage features requirements",
             AgentTask.TaskType.ENV_INFO,        "environment os java maven shell platform system"
     );
@@ -92,6 +93,10 @@ public class PlannerAgent {
                     .addStep("BM25: find existing README and documentation patterns")
                     .addStep("LLM: draft README.md with overview, setup, run, test, features, and requirements")
                     .addStep("Apply CREATE_FILE or MODIFY_FILE for README.md");
+            case ANALYZE -> plan
+                    .addStep("PSI: inspect the current project structure and primary entry points")
+                    .addStep("BM25: gather build files, configs, and related tests")
+                    .addStep("LLM: summarize architecture, dependencies, and risks in a structured report");
             default -> plan
                     .addStep("BM25: find relevant context")
                     .addStep("LLM: respond");
@@ -137,11 +142,31 @@ public class PlannerAgent {
 
     public AgentTask.TaskType detectTaskType(String message) {
         String m = message.toLowerCase();
+        if (m.contains("project understanding") || m.contains("project architecture")
+                || m.contains("folder structure") || m.contains("dependency graph")
+                || m.contains("module relationships") || m.contains("external services")
+                || m.contains("message brokers") || m.contains("message broker")
+                || m.contains("database") || m.contains("build system")
+                || m.contains("frameworks") || m.contains("main technologies")
+                || m.contains("entry point") || m.contains("current file")
+                || m.contains("related files") || m.contains("dependency analysis")
+                || m.contains("security review") || m.contains("performance review")
+                || m.contains("screenshot") || m.contains("analyze this file")
+                || m.contains("explain this file") || m.contains("find every file related")
+                || m.contains("current module") || m.contains("git status clean")
+                || m.contains("ide context"))
+            return AgentTask.TaskType.ANALYZE;
         if (m.contains("env info") || m.contains("environment info") || m.contains("my environment")
                 || m.contains("system info") || m.contains("platform info") || m.contains("my setup")
                 || (m.contains("give") && m.contains("env")) || (m.contains("send") && m.contains("env"))
                 || (m.contains("show") && m.contains("env")))
             return AgentTask.TaskType.ENV_INFO;
+        if (m.contains("build failure") || m.contains("fix compilation errors") || m.contains("compilation errors")
+                || (m.contains("build") && (m.contains("fail") || m.contains("failure") || m.contains("error")
+                    || m.contains("compile") || m.contains("compilation") || m.contains("rebuild")
+                    || m.contains("broken") || m.contains("fails")))
+                || m.contains("run the build") || m.contains("build the project"))
+            return AgentTask.TaskType.FIX_BUG;
         if (m.contains("test") || m.contains("spec") || m.contains("junit"))
             return AgentTask.TaskType.GENERATE_TESTS;
         if (m.contains("fix") || m.contains("bug") || m.contains("error") || m.contains("fail"))

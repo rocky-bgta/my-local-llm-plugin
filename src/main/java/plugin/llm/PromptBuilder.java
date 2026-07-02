@@ -22,8 +22,18 @@ public final class PromptBuilder {
         sb.append("<RUN_TESTS />  or  <RUN_TESTS test=\"ClassName\" />\n");
         sb.append("<CHECK_COMPILATION />\n");
         sb.append("<EXECUTE_COMMAND command=\"...\" />\n");
-        sb.append("TEST REQUESTS: write tests directly from retrieved context in the project's native framework. Do not use tree/ls/dir or custom commands to inspect structure. If no symbol is named, choose the most relevant source file and create its test file.\n");
-        sb.append("For project structure requests, return only the filtered tree of actual project files and folders. Exclude IDE/build/generated artifacts and keep tree format only.\n");
+        sb.append("TEST REQUESTS: write tests directly from retrieved context in the project's native framework. Do not use tree/ls/dir or custom commands to inspect structure. If no symbol is named, choose the most relevant source file in the current workspace and create its test file. Do not turn the request into a generic example; use the real repository class, package, and framework conventions.\n");
+        sb.append("For project structure requests, use the current workspace root. Do not ask which repository or directory to inspect. Do not call EXECUTE_COMMAND at all. Return only the filtered tree of actual project files and folders. The client will render the tree directly. Exclude IDE/build/generated artifacts and keep tree format only.\n");
+        sb.append("Normalize obvious user typos internally before acting; infer the intended meaning instead of asking the user to retype the prompt.\n");
+        sb.append("Do not ask clarification questions when the repository context is sufficient. Infer the likely task from the current workspace, recent history, attachments, and project conventions, then act.\n");
+        sb.append("For supported repository tasks, answer directly instead of returning a generic example, test plan, or template. Write the concrete artifact for the current workspace.\n");
+        sb.append("Never answer a repository task with a shell command as the primary output unless the workflow explicitly requires EXECUTE_COMMAND and the command is appropriate for the current operating system.\n");
+        sb.append("ANALYSIS TASKS: when the user asks for project understanding, architecture, folder structure, build system, frameworks, entry point, dependency graph, module relationships, external services, database, message brokers, test framework, current file explanation, related files, dependency analysis, security review, performance review, build failure analysis, or screenshot understanding, answer with a structured report instead of asking for the repo path. Use headings and concrete findings from the current workspace context.\n");
+        sb.append("For analysis tasks, do not say you need to inspect the repository, list files, or run discovery commands first; the client already provides project context and expects the final report.\n");
+        sb.append("For current-file requests, use the selected or most recently targeted symbol/file if available. For related-files requests, include interfaces, implementations, tests, controllers, services, repositories, configuration, and DTOs when relevant.\n");
+        sb.append("For build-failure or auto-fix requests, fix issues one by one and rebuild until clean. For dependency analysis, identify unused, duplicate, outdated, and risky dependencies. For security and performance reviews, list findings, impact, and concrete fixes.\n");
+        sb.append("For screenshot understanding, inspect the attached image first, identify UI errors or stack traces, then locate the source files to fix.\n");
+        sb.append("For large features or autonomous mode, create a plan, apply changes incrementally, and validate after each meaningful edit.\n");
         if (environmentInfo != null && !environmentInfo.isBlank()) {
             sb.append("Runtime environment:\n");
             sb.append(environmentInfo.strip()).append("\n");
@@ -42,6 +52,11 @@ public final class PromptBuilder {
         sb.append("· If the user attaches images, inspect marks, annotations, and highlighted regions, then act on the requested fix.\n");
         sb.append("· If the user attaches a Jira ticket or issue description, implement the requested feature or bug fix in the current codebase and add/update tests.\n");
         sb.append("· If the user asks to delete unnecessary files or clean up code, identify obsolete files or dead code, use DELETE_FILE or refactor changes as appropriate, and explain what was removed.\n");
+        sb.append("· If the user asks for tests, README, cleanup, or commit review in the current repository, do not ask for the repo path again; use the current workspace and the retrieved context.\n");
+        sb.append("· If the user asks for tests for a named symbol, generate the actual test file in the repository's test framework instead of a generic test checklist or example.\n");
+        sb.append("· If the user asks for README.md, create it from the current project structure and environment context instead of asking what the repository contains.\n");
+        sb.append("· If the user asks to review the latest commit, use the current repository commit diff and the supplied ticket/spec context; do not ask the user to fetch the commit hash manually.\n");
+        sb.append("· If the user asks for project understanding, current file explanation, related files, build failure analysis, dependency analysis, security review, or performance review, answer with concrete repository findings and structured sections.\n");
         sb.append("· If the user asks to build an Angular app from an attached image or PDF, treat that attachment as the UI/spec source and implement the Angular pages, components, services, routing, and styles accordingly.\n");
         sb.append("· If the user asks for a README or project documentation, create or update README.md with project overview, technologies, features, setup, run, test, environment requirements, and any container or deployment notes.\n");
         sb.append("· If the project contains Dockerfile, docker-compose, or Helm chart files, read them, use the local Docker/Helm tooling, and run the relevant build, template, lint, or container commands on the current machine.\n");
@@ -58,7 +73,7 @@ public final class PromptBuilder {
 
         sb.append("Mode: ").append(mode).append("\n");
         if ("PLANNING".equals(mode)) {
-            sb.append("PLANNING: discuss steps only, no file tags.\n");
+            sb.append("PLANNING: discuss steps only, no file tags, and do not wrap output in <PLAN> tags.\n");
         } else if ("EDITING".equals(mode)) {
             sb.append("EDITING: write every change with an XML tag — plain text descriptions do nothing.\n");
         } else {

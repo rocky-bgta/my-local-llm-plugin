@@ -8,20 +8,35 @@ public class PromptBuilderTest {
 
     @Test
     void systemPromptIsModelNeutralAndIncludesWorkflowRules() {
-        String prompt = PromptBuilder.buildSystemPrompt(
+        String editingPrompt = PromptBuilder.buildSystemPrompt(
                 "EDITING",
                 "past correction",
                 "## Developer Environment\n- **OS**: Linux 6.8.0 (amd64)\n- **Shell**: Bash\n",
                 "# Skills / Memory\n- **angular-app**: Build Angular apps from images and PDFs.\n");
+        String planningPrompt = PromptBuilder.buildSystemPrompt(
+                "PLANNING",
+                "past correction",
+                "## Developer Environment\n- **OS**: Linux 6.8.0 (amd64)\n- **Shell**: Bash\n",
+                "# Skills / Memory\n- **angular-app**: Build Angular apps from images and PDFs.\n");
 
-        assertTrue(prompt.contains("Runtime environment:"));
-        assertTrue(prompt.contains("Skills and memory:"));
-        assertTrue(prompt.contains("Use configured integrations"));
-        assertTrue(prompt.contains("review the latest git commit"));
-        assertTrue(prompt.contains("Dockerfile, docker-compose, or Helm chart files"));
-        assertTrue(prompt.contains("README or project documentation"));
-        assertTrue(prompt.contains("filtered tree of actual project files and folders"));
-        assertTrue(prompt.contains("update your skill set"));
+        assertTrue(editingPrompt.contains("Runtime environment:"));
+        assertTrue(editingPrompt.contains("Skills and memory:"));
+        assertTrue(editingPrompt.contains("Use configured integrations"));
+        assertTrue(editingPrompt.contains("review the latest git commit"));
+        assertTrue(editingPrompt.contains("Dockerfile, docker-compose, or Helm chart files"));
+        assertTrue(editingPrompt.contains("README or project documentation"));
+        assertTrue(editingPrompt.contains("filtered tree of actual project files and folders"));
+        assertTrue(editingPrompt.contains("Normalize obvious user typos internally before acting"));
+        assertTrue(editingPrompt.contains("Do not ask clarification questions when the repository context is sufficient"));
+        assertTrue(editingPrompt.contains("use the current workspace root"));
+        assertTrue(editingPrompt.contains("answer directly instead of returning a generic example"));
+        assertTrue(editingPrompt.contains("Never answer a repository task with a shell command as the primary output"));
+        assertTrue(editingPrompt.contains("do not ask for the repo path again"));
+        assertTrue(editingPrompt.contains("ANALYSIS TASKS"));
+        assertTrue(editingPrompt.contains("project understanding"));
+        assertTrue(editingPrompt.contains("update your skill set"));
+        assertTrue(editingPrompt.contains("Do not call EXECUTE_COMMAND at all"));
+        assertTrue(planningPrompt.contains("do not wrap output in <PLAN> tags"));
     }
 
     @Test

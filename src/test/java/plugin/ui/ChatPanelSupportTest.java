@@ -72,10 +72,58 @@ public class ChatPanelSupportTest {
     }
 
     @Test
+    void detectsAnalysisIntent() {
+        assertTrue(ChatPanelSupport.isAnalysisIntent("show me project understanding"));
+        assertTrue(ChatPanelSupport.isAnalysisIntent("find dependency graph and module relationships"));
+        assertTrue(ChatPanelSupport.isAnalysisIntent("security review and performance review"));
+        assertFalse(ChatPanelSupport.isAnalysisIntent("write a README"));
+    }
+
+    @Test
     void detectsProjectStructureIntent() {
         assertTrue(ChatPanelSupport.isProjectStructureIntent("show me project structure"));
         assertTrue(ChatPanelSupport.isProjectStructureIntent("display the directory tree"));
+        assertTrue(ChatPanelSupport.isProjectStructureIntent("show me project strucure"));
         assertFalse(ChatPanelSupport.isProjectStructureIntent("show me the README"));
+    }
+
+    @Test
+    void detectsStructureOnlyResponses() {
+        assertTrue(ChatPanelSupport.isStructureOnlyResponse("show me project structure"));
+        assertTrue(ChatPanelSupport.isStructureOnlyResponse("show me project strucure"));
+        assertFalse(ChatPanelSupport.isStructureOnlyResponse("what is the README"));
+    }
+
+    @Test
+    void formatsProjectStructureResponseProfessionally() {
+        String formatted = ChatPanelSupport.formatProjectStructureResponse(null);
+        assertTrue(formatted.isEmpty());
+    }
+
+    @Test
+    void detectsStructureListingCommands() {
+        assertTrue(ChatPanelSupport.isStructureListingCommand("tree -L 2"));
+        assertTrue(ChatPanelSupport.isStructureListingCommand("Get-ChildItem -Recurse"));
+        assertFalse(ChatPanelSupport.isStructureListingCommand("mvn test"));
+    }
+
+    @Test
+    void detectsNonActionableModelResponses() {
+        assertTrue(ChatPanelSupport.isNonActionableModelResponse(
+                "I cannot determine the structure of your current workspace without access to its contents."));
+        assertTrue(ChatPanelSupport.isNonActionableModelResponse(
+                "```bash\nfind . -name \"ChatPanel.java\"\n```"));
+        assertFalse(ChatPanelSupport.isNonActionableModelResponse(
+                "Current Project Structure\nFiltered view: IDE/build/generated artifacts are excluded."));
+    }
+
+    @Test
+    void canonicalizesActivityPhases() {
+        assertEquals("Thinking", ChatPanelSupport.canonicalActivityPhase("Thinking"));
+        assertEquals("Planning", ChatPanelSupport.canonicalActivityPhase("Planning"));
+        assertEquals("Debugging", ChatPanelSupport.canonicalActivityPhase("Debugging"));
+        assertEquals("Running", ChatPanelSupport.canonicalActivityPhase("Running command"));
+        assertEquals("Ready", ChatPanelSupport.canonicalActivityPhase(""));
     }
 
     @Test

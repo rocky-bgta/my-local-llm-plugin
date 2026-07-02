@@ -185,18 +185,125 @@ final class ChatPanelSupport {
                 || lower.contains("generate documentation");
     }
 
+    static boolean isAnalysisIntent(String userText) {
+        if (userText == null) return false;
+        String lower = userText.toLowerCase();
+        return lower.contains("project understanding")
+                || lower.contains("project architecture")
+                || lower.contains("folder structure")
+                || lower.contains("dependency graph")
+                || lower.contains("module relationships")
+                || lower.contains("external services")
+                || lower.contains("message brokers")
+                || lower.contains("message broker")
+                || lower.contains("build system")
+                || lower.contains("entry point")
+                || lower.contains("current file")
+                || lower.contains("related files")
+                || lower.contains("dependency analysis")
+                || lower.contains("security review")
+                || lower.contains("performance review")
+                || lower.contains("build failure")
+                || lower.contains("compilation errors")
+                || lower.contains("screenshot understanding")
+                || lower.contains("screenshot")
+                || lower.contains("ide context")
+                || lower.contains("project memory")
+                || lower.contains("autonomous mode")
+                || lower.contains("multi-step planning")
+                || lower.contains("context awareness");
+    }
+
     static boolean isProjectStructureIntent(String userText) {
         if (userText == null) return false;
         String lower = userText.toLowerCase();
-        return (lower.contains("project structure")
-                || lower.contains("show me project structure")
-                || lower.contains("show project structure")
+        boolean mentionsStructure = lower.contains("structure")
+                || lower.contains("strucure")
+                || lower.contains("project structure")
+                || lower.contains("project strucure")
                 || lower.contains("directory tree")
                 || lower.contains("folder tree")
                 || lower.contains("tree format")
                 || lower.contains("project tree")
-                || lower.contains("file tree"))
-                && (lower.contains("show") || lower.contains("list") || lower.contains("display") || lower.contains("structure") || lower.contains("tree"));
+                || lower.contains("file tree");
+        boolean asksToShow = lower.contains("show")
+                || lower.contains("list")
+                || lower.contains("display")
+                || lower.contains("print")
+                || lower.contains("see");
+        return mentionsStructure && asksToShow;
+    }
+
+    static boolean isStructureOnlyResponse(String userText) {
+        if (userText == null) return false;
+        String lower = userText.toLowerCase();
+        return isProjectStructureIntent(userText)
+                || (lower.contains("show me") && (lower.contains("tree") || lower.contains("structure") || lower.contains("strucure")));
+    }
+
+    static boolean isStructureListingCommand(String command) {
+        if (command == null) return false;
+        String lower = command.toLowerCase();
+        return lower.matches("^(tree|ls|dir)(\\s|$).*")
+                || lower.contains("find .")
+                || lower.contains("get-childitem")
+                || lower.contains("gci")
+                || lower.contains("ls -l")
+                || lower.contains("ls -la")
+                || lower.contains("tree -l")
+                || lower.contains("tree /f")
+                || lower.contains("tree /a")
+                || lower.contains("dir /s");
+    }
+
+    static boolean isClarificationRequest(String response) {
+        if (response == null) return false;
+        String lower = response.toLowerCase();
+        return lower.contains("could you clarify")
+                || lower.contains("could you please provide")
+                || lower.contains("please provide")
+                || lower.contains("need more information")
+                || lower.contains("i need more information")
+                || lower.contains("i need access")
+                || lower.contains("i don't have access")
+                || lower.contains("i do not have access")
+                || lower.contains("which repository")
+                || lower.contains("which repo")
+                || lower.contains("repository or directory")
+                || lower.contains("share the path")
+                || lower.contains("provide the path")
+                || lower.contains("need the path")
+                || lower.contains("without access to")
+                || lower.contains("i cannot determine")
+                || lower.contains("i can't determine")
+                || lower.contains("i need your")
+                || lower.contains("i would need");
+    }
+
+    static boolean isShellOrToolResponse(String response) {
+        if (response == null) return false;
+        String lower = response.toLowerCase();
+        return lower.contains("<execute_command")
+                || lower.contains("<run>")
+                || lower.contains("<run_command")
+                || lower.contains("<repository_search")
+                || lower.contains("<tool_call")
+                || lower.contains("<tool_code")
+                || lower.contains("```bash")
+                || lower.contains("```sh")
+                || lower.contains("```shell")
+                || lower.contains("grep -r")
+                || lower.contains("find .")
+                || lower.contains("ls -la")
+                || lower.contains("tree -l")
+                || lower.contains("git log -1")
+                || lower.contains("get-childitem")
+                || lower.contains("dir /s")
+                || lower.matches("(?s)^\\s*(ls|dir|tree|find|grep|git log|get-childitem)\\b.*");
+    }
+
+    static boolean isNonActionableModelResponse(String response) {
+        return isClarificationRequest(response) || isShellOrToolResponse(response);
     }
 
     static boolean isSkillUpdateIntent(String userText) {
@@ -291,11 +398,63 @@ final class ChatPanelSupport {
         return sb.toString().trim();
     }
 
+    static String buildProjectAnalysisContext(Project project) {
+        if (project == null || project.getBasePath() == null) return "";
+        StringBuilder sb = new StringBuilder();
+        sb.append("# Project Analysis Context\n");
+        sb.append("- Project type: ").append(projectTypeLabel(project)).append("\n");
+        String envSummary = EnvironmentInfoCollector.collectForPrompt(project);
+        String selectedEnvLines = envSummary.lines()
+                .filter(line -> line.startsWith("- **Build tool**")
+                        || line.startsWith("- **Primary language**")
+                        || line.startsWith("- **Test framework hint**")
+                        || line.startsWith("- **Container stack**"))
+                .collect(Collectors.joining("\n"));
+        if (selectedEnvLines.isBlank()) {
+            sb.append("- Primary language: ").append(LanguageSupportUtil.detectPrimaryLanguage(project)).append("\n");
+        } else {
+            sb.append(selectedEnvLines).append("\n");
+        }
+        String structure = ProjectContextUtil.getProjectContext(project, false);
+        if (!structure.isBlank()) {
+            sb.append("- Tree preview:\n");
+            sb.append(structure.length() > 5000 ? structure.substring(0, 5000) + "\n[...truncated]" : structure).append("\n");
+        }
+        String containerSummary = ContainerProjectUtil.buildPromptSummary(project.getBasePath());
+        if (!containerSummary.isBlank()) {
+            sb.append("- Container files:\n").append(containerSummary).append("\n");
+        }
+        return sb.toString().trim();
+    }
+
     static String buildProjectStructureContext(Project project) {
         if (project == null || project.getBasePath() == null) return "";
         String structure = ProjectContextUtil.getProjectContext(project, false);
         if (structure.isBlank()) return "";
         return "# Project Structure\n" + structure.trim();
+    }
+
+    static String formatProjectStructureResponse(Project project) {
+        String structure = buildProjectStructureContext(project);
+        if (structure.isBlank()) return "";
+        return "Current Project Structure\n"
+                + "Filtered view: IDE/build/generated artifacts are excluded.\n\n"
+                + structure.trim();
+    }
+
+    static String canonicalActivityPhase(String activity) {
+        if (activity == null || activity.isBlank()) return "Ready";
+        String lower = activity.toLowerCase();
+        if (lower.contains("plan")) return "Planning";
+        if (lower.contains("think")) return "Thinking";
+        if (lower.contains("work")) return "Working";
+        if (lower.contains("debug")) return "Debugging";
+        if (lower.contains("test")) return "Testing";
+        if (lower.contains("review")) return "Reviewing";
+        if (lower.contains("command") || lower.contains("run")) return "Running";
+        if (lower.contains("interrupt")) return "Interrupted";
+        if (lower.contains("idle") || lower.contains("ready")) return "Ready";
+        return activity;
     }
 
     static List<String> splitIntoChunks(String text, int chunkSize) {

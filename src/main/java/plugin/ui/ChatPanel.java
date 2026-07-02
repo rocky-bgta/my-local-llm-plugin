@@ -34,7 +34,9 @@ import java.awt.datatransfer.DataFlavor;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 public class ChatPanel implements com.intellij.openapi.Disposable {
 
@@ -59,6 +61,7 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
     private JLabel  fileHistoryLabel;
     private JLabel  gitStatusLabel;
     private JProgressBar contextBar;
+    private JPanel phaseStripPanel;
     private String  workspaceProjectTypeLabel = "Unknown project";
     private Content tabContent;
     private boolean titleGenerated = false;
@@ -97,6 +100,7 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
 
     // Streaming state (all accessed on EDT only)
     private final Timer         blinkTimer;
+    private final Timer         statusPulseTimer;
     private       boolean       streaming       = false;
     private       boolean       cursorOn        = false;
     private final StringBuilder assistantBuffer = new StringBuilder();
@@ -124,12 +128,17 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
     private Style assistantTextStyle;
     private Style systemStyle;
     private Style cursorStyle;
+    private String statusBaseActivity = "Ready";
+    private int statusPulsePhase = 0;
+    private final Map<String, JLabel> phaseChipLabels = new LinkedHashMap<>();
 
     public ChatPanel(@NotNull Project project) {
         this.project = project;
         project.putUserData(PANEL_KEY, this);
         blinkTimer = new Timer(500, e -> toggleBlink());
         blinkTimer.setRepeats(true);
+        statusPulseTimer = new Timer(450, e -> toggleStatusPulse());
+        statusPulseTimer.setRepeats(true);
 
         root = new JPanel(new BorderLayout());
         root.add(buildToolbar(),    BorderLayout.NORTH);
@@ -153,6 +162,7 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
     public JButton getClearContextBtn() { return clearContextBtn; }
     public JProgressBar getSpinner() { return spinner; }
     public Timer getBlinkTimer() { return blinkTimer; }
+    public Timer getStatusPulseTimer() { return statusPulseTimer; }
     public JLabel getTitleLabel() { return titleLabel; }
     public JLabel getWorkspaceStatusLabel() { return workspaceStatusLabel; }
     public JLabel getActivityLabel() { return activityLabel; }
@@ -175,16 +185,16 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
     // -------------------------------------------------------------------------
 
     JPanel buildToolbar() {
-        JPanel bar = new JPanel(new BorderLayout());
+        JPanel bar = new JPanel();
+        bar.setLayout(new BoxLayout(bar, BoxLayout.Y_AXIS));
         bar.setBorder(BorderFactory.createCompoundBorder(
                 BorderFactory.createMatteBorder(0, 0, 1, 0, UIManager.getColor("Separator.foreground")),
-                BorderFactory.createEmptyBorder(0, 0, 2, 8)
+                BorderFactory.createEmptyBorder(4, 8, 6, 8)
         ));
-        bar.setPreferredSize(new Dimension(0, 36));
+        bar.setOpaque(true);
 
         titleLabel = new JLabel("  New Chat");
         titleLabel.setFont(titleLabel.getFont().deriveFont(Font.BOLD, 13f));
-        bar.add(titleLabel, BorderLayout.WEST);
 
         modeCombo = new JComboBox<>(new String[]{"PLANNING", "EDITING", "BYPASS"});
         modeCombo.setSelectedItem("PLANNING");
@@ -197,8 +207,12 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
         refreshWorkspaceStatus();
 
         activityLabel = new JLabel();
-        activityLabel.setFont(activityLabel.getFont().deriveFont(Font.PLAIN, 11f));
-        activityLabel.setBorder(BorderFactory.createEmptyBorder(0, 6, 0, 6));
+        activityLabel.setFont(activityLabel.getFont().deriveFont(Font.BOLD, 12f));
+        activityLabel.setOpaque(true);
+        activityLabel.setBorder(BorderFactory.createCompoundBorder(
+                BorderFactory.createLineBorder(UIManager.getColor("Separator.foreground")),
+                BorderFactory.createEmptyBorder(3, 8, 3, 8)
+        ));
 
         fileHistoryLabel = new JLabel();
         fileHistoryLabel.setFont(fileHistoryLabel.getFont().deriveFont(Font.PLAIN, 11f));
@@ -210,9 +224,11 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
 
         contextBar = new JProgressBar(0, 100);
         contextBar.setStringPainted(true);
-        contextBar.setPreferredSize(new Dimension(120, 16));
+        contextBar.setPreferredSize(new Dimension(140, 16));
+        contextBar.setMaximumSize(new Dimension(220, 18));
         refreshTelemetry("Ready", null);
         refreshVersionControlStatus();
+        phaseStripPanel = buildPhaseStrip();
 
         clearContextBtn = new JButton("Clear Context");
         clearContextBtn.setToolTipText("Clear chat display and reset conversation context (Ctrl+Shift+N)");
@@ -226,20 +242,50 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
         gearBtn.setToolTipText("Settings");
         gearBtn.addActionListener(e -> showSettingsDialog());
 
-        JPanel right = new JPanel(new FlowLayout(FlowLayout.RIGHT, 6, 0));
-        right.setOpaque(false);
-        right.add(activityLabel);
-        right.add(new JLabel("Mode:"));
-        right.add(modeCombo);
-        right.add(workspaceStatusLabel);
-        right.add(contextBar);
-        right.add(fileHistoryLabel);
-        right.add(gitStatusLabel);
-        right.add(clearContextBtn);
-        right.add(gearBtn);
-        bar.add(right, BorderLayout.EAST);
+        JPanel headerRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 0));
+        headerRow.setOpaque(false);
+        headerRow.add(titleLabel);
+        headerRow.add(Box.createHorizontalStrut(8));
+        headerRow.add(new JLabel("Mode:"));
+        headerRow.add(modeCombo);
+        headerRow.add(clearContextBtn);
+        headerRow.add(gearBtn);
+
+        JPanel statusRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 0));
+        statusRow.setOpaque(false);
+        statusRow.add(activityLabel);
+        statusRow.add(workspaceStatusLabel);
+        statusRow.add(contextBar);
+        statusRow.add(fileHistoryLabel);
+        statusRow.add(gitStatusLabel);
+
+        bar.add(headerRow);
+        bar.add(Box.createVerticalStrut(4));
+        bar.add(statusRow);
+        bar.add(Box.createVerticalStrut(4));
+        bar.add(phaseStripPanel);
 
         return bar;
+    }
+
+    private JPanel buildPhaseStrip() {
+        JPanel strip = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 0));
+        strip.setOpaque(false);
+        strip.setBorder(BorderFactory.createEmptyBorder(0, 0, 0, 0));
+        for (String phase : List.of("Ready", "Planning", "Thinking", "Working", "Debugging", "Testing", "Reviewing", "Running", "Interrupted")) {
+            JLabel chip = new JLabel(phase);
+            chip.setFont(chip.getFont().deriveFont(Font.PLAIN, 11f));
+            chip.setOpaque(true);
+            chip.setBorder(BorderFactory.createCompoundBorder(
+                    BorderFactory.createLineBorder(UIManager.getColor("Separator.foreground")),
+                    BorderFactory.createEmptyBorder(3, 8, 3, 8)
+            ));
+            chip.setForeground(UIManager.getColor("Label.disabledForeground"));
+            phaseChipLabels.put(phase, chip);
+            strip.add(chip);
+        }
+        updatePhaseStrip("Ready");
+        return strip;
     }
 
     // -------------------------------------------------------------------------
@@ -596,10 +642,7 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
                 BorderFactory.createLineBorder(attachmentBorderColor),
                 BorderFactory.createEmptyBorder(8, 8, 8, 8)
         ));
-        attachmentHintLabel = new JLabel("Drop images or files here to attach them to the next prompt.");
-        attachmentHintLabel.setFont(attachmentHintLabel.getFont().deriveFont(Font.ITALIC, 11f));
-        attachmentHintLabel.setForeground(UIManager.getColor("Label.disabledForeground"));
-        attachmentsPanel.add(attachmentHintLabel);
+        attachmentHintLabel = null;
         attachmentsPanel.setTransferHandler(buildAttachmentTransferHandler());
         refreshAttachmentStrip();
 
@@ -608,7 +651,7 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
         promptArea.setLineWrap(true);
         promptArea.setWrapStyleWord(true);
         promptArea.setMargin(new Insets(6, 8, 6, 8));
-        promptArea.setToolTipText("Type a prompt, or drag and drop files above to attach them.");
+        promptArea.setToolTipText(null);
         // Enter = send   |   Shift+Enter = newline
         promptArea.addKeyListener(new KeyAdapter() {
             @Override
@@ -711,6 +754,32 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
         if (text.isEmpty()) {
             text = AttachmentUtil.suggestedUserPrompt(attachments);
         }
+
+        if (ChatPanelSupport.isStructureOnlyResponse(text)) {
+            String structure = ChatPanelSupport.formatProjectStructureResponse(project);
+            if (structure.isBlank()) {
+                appendSystemMessage("Project structure is unavailable for this workspace.");
+                return;
+            }
+            estimatedInputTokens += ChatPanelSupport.estimateTokens(text);
+            estimatedOutputTokens += ChatPanelSupport.estimateTokens(structure);
+            refreshWorkspaceStatus();
+            appendUserMessage(text);
+            history.add(new ChatMessage("user", text));
+            appendAssistantMessage(structure);
+            history.add(new ChatMessage("assistant", structure));
+            promptArea.setText("");
+            pendingAttachments.clear();
+            refreshAttachmentStrip();
+            resetPromptHistoryNavigation();
+            if (!titleGenerated && text != null) {
+                titleGenerated = true;
+                generateTitle(text);
+            }
+            refreshTelemetry("Idle", null);
+            return;
+        }
+
         recordPromptHistory(text);
         newlyCreatedFiles.clear();
         buildFixAttempts       = 0;
@@ -787,6 +856,15 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
                 }
                 memoryInfo += containerInfo;
             }
+            if (ChatPanelSupport.isAnalysisIntent(text)) {
+                String analysisContext = ChatPanelSupport.buildProjectAnalysisContext(project);
+                if (!analysisContext.isBlank()) {
+                    if (!memoryInfo.isBlank()) {
+                        memoryInfo += "\n\n";
+                    }
+                    memoryInfo += analysisContext;
+                }
+            }
             String reviewContext = buildReviewContext(text, attachments);
             if (!reviewContext.isBlank()) {
                 if (!memoryInfo.isBlank()) {
@@ -825,34 +903,6 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
                 String updatedSystemPrompt = first.content().replaceFirst("Mode: (PLANNING|EDITING|BYPASS)", "Mode: " + mode);
                 history.set(0, new ChatMessage("system", updatedSystemPrompt));
             }
-        }
-
-        if (ChatPanelSupport.isProjectStructureIntent(text)) {
-            String structure = ChatPanelSupport.buildProjectStructureContext(project);
-            if (structure.isBlank()) {
-                appendSystemMessage("Project structure is unavailable for this workspace.");
-                setLoading(false);
-                return;
-            }
-            estimatedInputTokens += ChatPanelSupport.estimateTokens(text);
-            estimatedOutputTokens += ChatPanelSupport.estimateTokens(structure);
-            refreshWorkspaceStatus();
-            appendUserMessage(text);
-            history.add(new ChatMessage("user", text));
-            appendAssistantMessage(structure);
-            history.add(new ChatMessage("assistant", structure));
-
-            promptArea.setText("");
-            pendingAttachments.clear();
-            refreshAttachmentStrip();
-            resetPromptHistoryNavigation();
-            if (!titleGenerated && text != null) {
-                titleGenerated = true;
-                generateTitle(text);
-            }
-            refreshTelemetry("Idle", null);
-            setLoading(false);
-            return;
         }
 
         appendUserMessage(text);
@@ -948,6 +998,35 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
                                 responseLower.contains("<delete_folder"));
                         boolean hasTests = fullResponse.contains("<RUN_TESTS") || fullResponse.contains("<CHECK_COMPILATION");
                         boolean hasCustomCommand = fullResponse.contains("<EXECUTE_COMMAND");
+
+                        if (ChatPanelSupport.isProjectStructureIntent(userText)
+                                && (ChatPanelSupport.isNonActionableModelResponse(fullResponse)
+                                    || (hasCustomCommand && ChatPanelSupport.isStructureListingCommand(fullResponse)))) {
+                            appendSystemMessage("Project structure requests are rendered directly. Ignoring shell listing output.");
+                            String structure = ChatPanelSupport.formatProjectStructureResponse(project);
+                            if (!structure.isBlank()) {
+                                history.add(new ChatMessage("assistant", structure));
+                            }
+                            refreshTelemetry("Idle", finalSnapshot);
+                            setLoading(false);
+                            return;
+                        }
+
+                        if (canRetry && ChatPanelSupport.isNonActionableModelResponse(fullResponse)
+                                && (ChatPanelSupport.isReadmeIntent(userText)
+                                    || ChatPanelSupport.isCommitReviewIntent(userText)
+                                    || ChatPanelSupport.isSkillUpdateIntent(userText)
+                                    || ChatPanelSupport.isDockerOrHelmIntent(userText)
+                                    || ChatPanelSupport.isAnalysisIntent(userText)
+                                    || taskType == AgentTask.TaskType.FIX_BUG)) {
+                            recordMistakes(java.util.List.of("non-actionable-response"));
+                            appendSystemMessage("⚠ Model returned a clarification or shell command instead of task output — auto-correcting…");
+                            history.add(new ChatMessage("user", buildTaskRetryCorrection(userText, taskType, attachments)));
+                            beginAssistantMessage();
+                            blinkTimer.start();
+                            streamAndHandle(model, endpoint, null, false, taskType, attachments);
+                            return;
+                        }
                         
                         if (canRetry && hasMalformedTags) {
                             recordMistakes(java.util.List.of("uppercase-xml-tags"));
@@ -1059,6 +1138,20 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
                                              fullResponse.contains("<CREATE_FOLDER") ||
                                              fullResponse.contains("<DELETE_FILE") ||
                                              fullResponse.contains("<DELETE_FOLDER");
+
+                        if (ChatPanelSupport.isProjectStructureIntent(userText)
+                                && (ChatPanelSupport.isNonActionableModelResponse(fullResponse)
+                                    || (fullResponse.contains("<EXECUTE_COMMAND")
+                                        && ChatPanelSupport.isStructureListingCommand(fullResponse)))) {
+                            appendSystemMessage("Project structure requests are rendered directly. Ignoring shell listing output.");
+                            String structure = ChatPanelSupport.formatProjectStructureResponse(project);
+                            if (!structure.isBlank()) {
+                                history.add(new ChatMessage("assistant", structure));
+                            }
+                            refreshTelemetry("Idle", finalSnapshot);
+                            setLoading(false);
+                            return;
+                        }
 
                         if (fullResponse.contains("<RUN_TESTS") || fullResponse.contains("<CHECK_COMPILATION") || fullResponse.contains("<EXECUTE_COMMAND")) {
                             FileOperationUtil.FileOpResult opResult = FileOperationUtil.processFileOperations(project, fullResponse);
@@ -1679,6 +1772,7 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
             currentChatThread.interrupt();
         }
         blinkTimer.stop();
+        statusPulseTimer.stop();
         if (contextCollector != null) {
             contextCollector = null;
         }
@@ -1699,7 +1793,25 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
 
     private void refreshTelemetry(String activity, List<ChatMessage> snapshot) {
         if (activityLabel != null) {
-            activityLabel.setText("Status: " + (activity == null || activity.isBlank() ? "Ready" : activity));
+            String displayActivity = ChatPanelSupport.canonicalActivityPhase(activity);
+            if ("PLANNING".equals(mode) && "Thinking".equals(displayActivity)) {
+                displayActivity = "Planning";
+            }
+            statusBaseActivity = displayActivity;
+            updatePhaseStrip(displayActivity);
+            boolean animate = !"Ready".equals(displayActivity)
+                    && !"Idle".equals(displayActivity)
+                    && !"Interrupted".equals(displayActivity);
+            if (animate) {
+                if (!statusPulseTimer.isRunning()) {
+                    statusPulsePhase = 0;
+                    statusPulseTimer.start();
+                }
+                updateActivityLabel();
+            } else {
+                statusPulseTimer.stop();
+                activityLabel.setText(displayActivity);
+            }
             activityLabel.setToolTipText(activityLabel.getText());
         }
         if (fileHistoryLabel != null) {
@@ -1713,6 +1825,47 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
             contextBar.setString("Context " + currentContextUsagePercent + "%");
             contextBar.setToolTipText("Estimated context usage: " + currentContextUsagePercent + "% of ~" + CONTEXT_BUDGET_TOKENS + " tokens.");
         }
+    }
+
+    private void toggleStatusPulse() {
+        updateActivityLabel();
+    }
+
+    private void updateActivityLabel() {
+        if (activityLabel == null) return;
+        String[] suffixes = {"", ".", "..", "..."};
+        String suffix = suffixes[Math.floorMod(statusPulsePhase, suffixes.length)];
+        activityLabel.setText(statusBaseActivity + suffix);
+        activityLabel.setToolTipText(activityLabel.getText());
+        statusPulsePhase = (statusPulsePhase + 1) % suffixes.length;
+        updatePhaseStrip(statusBaseActivity);
+    }
+
+    private void updatePhaseStrip(String activePhase) {
+        if (phaseChipLabels.isEmpty()) return;
+        String canonical = ChatPanelSupport.canonicalActivityPhase(activePhase);
+        for (Map.Entry<String, JLabel> entry : phaseChipLabels.entrySet()) {
+            boolean active = entry.getKey().equals(canonical);
+            JLabel chip = entry.getValue();
+            chip.setForeground(active ? UIManager.getColor("Label.foreground") : UIManager.getColor("Label.disabledForeground"));
+            chip.setBackground(active ? new Color(0x2D7DD2) : UIManager.getColor("Panel.background"));
+            chip.setBorder(BorderFactory.createCompoundBorder(
+                    BorderFactory.createLineBorder(active ? new Color(0x4C9AFF) : UIManager.getColor("Separator.foreground")),
+                    BorderFactory.createEmptyBorder(3, 8, 3, 8)
+            ));
+            String baseText = entry.getKey();
+            chip.setText(active ? baseText + suffixForPulse() : baseText);
+            chip.setToolTipText(active ? baseText + " (active)" : baseText);
+        }
+    }
+
+    private String suffixForPulse() {
+        return switch (statusPulsePhase % 4) {
+            case 1 -> ".";
+            case 2 -> "..";
+            case 3 -> "...";
+            default -> "";
+        };
     }
 
     private void refreshVersionControlStatus() {
@@ -1902,14 +2055,72 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
         return parts[0] + (parts.length > 1 ? "-" + parts[1] : "");
     }
 
+    private String buildTaskRetryCorrection(String userText, AgentTask.TaskType taskType, List<AttachmentData> attachments) {
+        if (ChatPanelSupport.isReadmeIntent(userText) || taskType == AgentTask.TaskType.DOCUMENT) {
+            return """
+                    CORRECTION REQUIRED: Create or update README.md for the current repository using the current workspace context.
+                    Do not ask for the repository path.
+                    Do not output a shell command or a clarifying question.
+                    Produce the concrete README content now with overview, technologies, features, setup, run, test, environment requirements, and deployment/container notes.
+                    """.trim();
+        }
+        if (ChatPanelSupport.isCommitReviewIntent(userText) || taskType == AgentTask.TaskType.REVIEW_COMMIT) {
+            return """
+                    CORRECTION REQUIRED: Review the latest commit against the current branch and any ticket/spec context already available.
+                    Do not ask for a repository path or emit a shell command.
+                    Return actionable reviewer comments with missing behavior, regressions, and test gaps. Prefer file and line references.
+                    """.trim();
+        }
+        if (ChatPanelSupport.isSkillUpdateIntent(userText)) {
+            return """
+                    CORRECTION REQUIRED: Persist the solved workflow as reusable skill memory.
+                    Do not ask for more context or output a shell command.
+                    Save the learned pattern from this session and summarize what was learned.
+                    """.trim();
+        }
+        if (ChatPanelSupport.isDockerOrHelmIntent(userText)) {
+            return """
+                    CORRECTION REQUIRED: Inspect the current repository's Docker, Compose, or Helm files using the workspace context already available.
+                    Do not ask for the repository path or output a shell command.
+                    Explain what the container configuration does, or apply the requested container change directly.
+                    """.trim();
+        }
+        if (ChatPanelSupport.isAnalysisIntent(userText)) {
+            return """
+                    CORRECTION REQUIRED: Analyze the current repository using the workspace context already available.
+                    Do not ask for the repository path or output a shell command.
+                    Return a structured analysis with concrete repository findings for the requested topic.
+                    Include the relevant files, dependencies, build system, framework, risks, and suggested follow-up actions when applicable.
+                    """.trim();
+        }
+        if (taskType == AgentTask.TaskType.FIX_BUG) {
+            return """
+                    CORRECTION REQUIRED: Fix the compilation/build problem in the current repository using the workspace context already available.
+                    Do not ask for the repository path or output a shell command.
+                    Identify the failing files, apply the minimal fix, rebuild, and continue until the project compiles successfully.
+                    """.trim();
+        }
+        if (taskType == AgentTask.TaskType.GENERATE_TESTS || ChatPanelSupport.isFileOpIntent(userText)) {
+            String targetNote = AttachmentUtil.containsJiraTicketAttachment(attachments)
+                    ? "Use the ticket/spec context if attached."
+                    : "Use the real repository class, package, and framework conventions.";
+            return """
+                    CORRECTION REQUIRED: Write the actual test file or file operation for the current repository.
+                    Do not output a shell command, generic example, test plan, or clarifying question.
+                    Use the project's detected language and test framework. %s
+                    Output only the required XML file-operation tag with complete content.
+                    """.formatted(targetNote).trim();
+        }
+        return """
+                CORRECTION REQUIRED: Answer the current repository task directly using the current workspace context.
+                Do not output a shell command or a clarifying question.
+                """.trim();
+    }
+
     private void refreshAttachmentStrip() {
         if (attachmentsPanel == null) return;
         attachmentsPanel.removeAll();
-        if (pendingAttachments.isEmpty()) {
-            if (attachmentHintLabel != null) {
-                attachmentsPanel.add(attachmentHintLabel);
-            }
-        } else {
+        if (!pendingAttachments.isEmpty()) {
             for (int i = 0; i < pendingAttachments.size(); i++) {
                 AttachmentData attachment = pendingAttachments.get(i);
                 attachmentsPanel.add(buildAttachmentChip(attachment, i));

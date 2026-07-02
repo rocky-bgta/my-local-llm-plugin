@@ -45,11 +45,31 @@ public class PlannerAgentTest {
     }
 
     @Test
+    void detectsAnalysisRequests() {
+        PlannerAgent planner = new PlannerAgent();
+
+        assertEquals(AgentTask.TaskType.ANALYZE,
+                planner.detectTaskType("show me project understanding"));
+        assertEquals(AgentTask.TaskType.ANALYZE,
+                planner.detectTaskType("find dependency graph and module relationships"));
+        assertEquals(AgentTask.TaskType.ANALYZE,
+                planner.detectTaskType("security review and performance review"));
+    }
+
+    @Test
     void detectsDeleteAndCleanupRequestsAsRefactor() {
         PlannerAgent planner = new PlannerAgent();
 
         assertEquals(AgentTask.TaskType.REFACTOR,
                 planner.detectTaskType("delete unnecessary files and cleanup dead code"));
         assertTrue(planner.expandQuery("cleanup dead code").contains("cleanup"));
+    }
+
+    @Test
+    void detectsBuildFailureRequestsAsFixBug() {
+        PlannerAgent planner = new PlannerAgent();
+
+        assertEquals(AgentTask.TaskType.FIX_BUG,
+                planner.detectTaskType("Fix compilation errors. Build the project and rebuild until it succeeds."));
     }
 }
