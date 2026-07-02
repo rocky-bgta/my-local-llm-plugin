@@ -13,6 +13,10 @@ public class OpenChatAction extends AnAction {
     public void actionPerformed(@NotNull AnActionEvent e) {
         Project project = e.getProject();
         if (project == null) return;
+        showToolWindow(project);
+    }
+
+    protected void showToolWindow(@NotNull Project project) {
         ToolWindow toolWindow = ToolWindowManager.getInstance(project).getToolWindow("Local LLM");
         if (toolWindow != null) toolWindow.show(null);
     }

@@ -38,6 +38,7 @@ public class PromptBuilderTest {
         assertTrue(editingPrompt.contains("ANALYSIS TASKS"));
         assertTrue(editingPrompt.contains("project understanding"));
         assertTrue(editingPrompt.contains("update your skill set"));
+        assertTrue(editingPrompt.contains("create them in the file operation path"));
         assertTrue(editingPrompt.contains("do not emit RUN_TESTS or EXECUTE_COMMAND tags in normal answers"));
         assertTrue(editingPrompt.contains("The client handles test execution and terminal commands"));
         assertTrue(planningPrompt.contains("do not wrap output in <PLAN> tags"));

@@ -262,45 +262,41 @@ public class FileOperationUtil {
     }
 
     private static void createFolder(Project project, String relativePath) {
-        ApplicationManager.getApplication().invokeLater(() -> {
-            ApplicationManager.getApplication().runWriteAction(() -> {
-                try {
-                    VirtualFile baseDir = project.getBaseDir();
-                    if (baseDir == null) return;
+        ApplicationManager.getApplication().runWriteAction(() -> {
+            try {
+                VirtualFile baseDir = project.getBaseDir();
+                if (baseDir == null) return;
 
-                    String[] parts = relativePath.replace("\\", "/").split("/");
-                    VirtualFile current = baseDir;
-                    for (String part : parts) {
-                        if (part.isEmpty()) continue;
-                        VirtualFile child = current.findChild(part);
-                        if (child == null) {
-                            child = current.createChildDirectory(null, part);
-                        }
-                        current = child;
+                String[] parts = relativePath.replace("\\", "/").split("/");
+                VirtualFile current = baseDir;
+                for (String part : parts) {
+                    if (part.isEmpty()) continue;
+                    VirtualFile child = current.findChild(part);
+                    if (child == null) {
+                        child = current.createChildDirectory(null, part);
                     }
-                } catch (IOException e) {
-                    // Log error
+                    current = child;
                 }
-            });
+            } catch (IOException e) {
+                // Log error
+            }
         });
     }
 
     private static void deletePath(Project project, String relativePath) {
-        ApplicationManager.getApplication().invokeLater(() -> {
-            ApplicationManager.getApplication().runWriteAction(() -> {
-                try {
-                    VirtualFile baseDir = project.getBaseDir();
-                    if (baseDir == null) return;
+        ApplicationManager.getApplication().runWriteAction(() -> {
+            try {
+                VirtualFile baseDir = project.getBaseDir();
+                if (baseDir == null) return;
 
-                    String normalizedPath = relativePath.replace("\\", "/");
-                    VirtualFile target = baseDir.findFileByRelativePath(normalizedPath);
-                    if (target != null && target.exists()) {
-                        target.delete(null);
-                    }
-                } catch (IOException e) {
-                    // Log error
+                String normalizedPath = relativePath.replace("\\", "/");
+                VirtualFile target = baseDir.findFileByRelativePath(normalizedPath);
+                if (target != null && target.exists()) {
+                    target.delete(null);
                 }
-            });
+            } catch (IOException e) {
+                // Log error
+            }
         });
     }
 
@@ -343,32 +339,29 @@ public class FileOperationUtil {
     }
 
     private static void writeFile(Project project, String relativePath, String content) {
-        ApplicationManager.getApplication().invokeLater(() -> {
-            ApplicationManager.getApplication().runWriteAction(() -> {
-                try {
-                    VirtualFile baseDir = project.getBaseDir();
-                    if (baseDir == null) return;
+        ApplicationManager.getApplication().runWriteAction(() -> {
+            try {
+                VirtualFile baseDir = project.getBaseDir();
+                if (baseDir == null) return;
 
-                    String normalizedPath = relativePath.replace("\\", "/");
-                    File file = new File(baseDir.getPath(), normalizedPath);
-                    File parent = file.getParentFile();
-                    if (parent != null && !parent.exists()) {
-                        Files.createDirectories(parent.toPath());
-                    }
-
-                    Files.writeString(file.toPath(), content, StandardCharsets.UTF_8,
-                            java.nio.file.StandardOpenOption.CREATE,
-                            java.nio.file.StandardOpenOption.TRUNCATE_EXISTING);
-
-                    LocalFileSystem.getInstance().refreshAndFindFileByIoFile(file);
-                    VirtualFile virtualFile = LocalFileSystem.getInstance().refreshAndFindFileByIoFile(file);
-                    if (virtualFile != null) {
-                        virtualFile.refresh(false, false);
-                    }
-                } catch (IOException e) {
-                    // Log error
+                String normalizedPath = relativePath.replace("\\", "/");
+                File file = new File(baseDir.getPath(), normalizedPath);
+                File parent = file.getParentFile();
+                if (parent != null && !parent.exists()) {
+                    Files.createDirectories(parent.toPath());
                 }
-            });
+
+                Files.writeString(file.toPath(), content, StandardCharsets.UTF_8,
+                        java.nio.file.StandardOpenOption.CREATE,
+                        java.nio.file.StandardOpenOption.TRUNCATE_EXISTING);
+
+                VirtualFile virtualFile = LocalFileSystem.getInstance().refreshAndFindFileByIoFile(file);
+                if (virtualFile != null) {
+                    virtualFile.refresh(false, false);
+                }
+            } catch (IOException e) {
+                // Log error
+            }
         });
     }
 }

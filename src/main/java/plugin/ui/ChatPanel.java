@@ -244,24 +244,34 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
         gearBtn.setHorizontalTextPosition(SwingConstants.RIGHT);
         gearBtn.setVerticalTextPosition(SwingConstants.CENTER);
         gearBtn.setIconTextGap(6);
+        gearBtn.setPreferredSize(new Dimension(128, 28));
         gearBtn.addActionListener(e -> showSettingsDialog());
 
-        JPanel headerRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 0));
+        JPanel headerRow = new JPanel(new BorderLayout(8, 0));
         headerRow.setOpaque(false);
-        headerRow.add(titleLabel);
-        headerRow.add(Box.createHorizontalStrut(8));
-        headerRow.add(new JLabel("Mode:"));
-        headerRow.add(modeCombo);
-        headerRow.add(clearContextBtn);
-        headerRow.add(gearBtn);
+        JPanel headerLeft = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 0));
+        headerLeft.setOpaque(false);
+        headerLeft.add(titleLabel);
+        headerLeft.add(Box.createHorizontalStrut(8));
+        headerLeft.add(new JLabel("Mode:"));
+        headerLeft.add(modeCombo);
+        headerLeft.add(clearContextBtn);
+        headerRow.add(headerLeft, BorderLayout.WEST);
 
-        JPanel statusRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 0));
+        JPanel statusRow = new JPanel(new BorderLayout(8, 0));
         statusRow.setOpaque(false);
-        statusRow.add(activityLabel);
-        statusRow.add(workspaceStatusLabel);
-        statusRow.add(contextBar);
-        statusRow.add(fileHistoryLabel);
-        statusRow.add(gitStatusLabel);
+        JPanel statusLeft = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 0));
+        statusLeft.setOpaque(false);
+        statusLeft.add(activityLabel);
+        statusLeft.add(workspaceStatusLabel);
+        statusLeft.add(contextBar);
+        statusLeft.add(fileHistoryLabel);
+        statusLeft.add(gitStatusLabel);
+        JPanel statusRight = new JPanel(new FlowLayout(FlowLayout.RIGHT, 0, 0));
+        statusRight.setOpaque(false);
+        statusRight.add(gearBtn);
+        statusRow.add(statusLeft, BorderLayout.WEST);
+        statusRow.add(statusRight, BorderLayout.EAST);
 
         bar.add(headerRow);
         bar.add(Box.createVerticalStrut(4));
@@ -645,7 +655,7 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
         if (attachmentBorderColor == null) attachmentBorderColor = Color.GRAY;
         attachmentsPanel.setBorder(BorderFactory.createCompoundBorder(
                 BorderFactory.createLineBorder(attachmentBorderColor),
-                BorderFactory.createEmptyBorder(8, 8, 8, 8)
+                BorderFactory.createEmptyBorder(5, 6, 5, 6)
         ));
         JPanel attachmentHeader = new JPanel(new BorderLayout(8, 0));
         attachmentHeader.setOpaque(false);
@@ -681,7 +691,8 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
         attachmentScroll.setVerticalScrollBarPolicy(ScrollPaneConstants.VERTICAL_SCROLLBAR_AS_NEEDED);
         attachmentScroll.getViewport().setOpaque(false);
         attachmentScroll.setOpaque(false);
-        attachmentScroll.setPreferredSize(new Dimension(0, 88));
+        attachmentScroll.setPreferredSize(new Dimension(0, 44));
+        attachmentScroll.setMaximumSize(new Dimension(Integer.MAX_VALUE, 52));
 
         attachmentsPanel.add(attachmentHeader, BorderLayout.NORTH);
         attachmentsPanel.add(attachmentScroll, BorderLayout.CENTER);
@@ -2167,7 +2178,7 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
             return """
                     CORRECTION REQUIRED: Write the actual test file or file operation for the current repository.
                     Do not output a shell command, generic example, test plan, or clarifying question.
-                    Use the project's detected language and test framework. %s
+                    Use the project's detected language and test framework. If the package folders are missing, create them in the file-operation path. %s
                     Output only the required XML file-operation tag with complete content.
                     """.formatted(targetNote).trim();
         }
@@ -2224,7 +2235,7 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
         if (backgroundColor == null) backgroundColor = Color.WHITE;
         chip.setBorder(BorderFactory.createCompoundBorder(
                 BorderFactory.createLineBorder(borderColor),
-                BorderFactory.createEmptyBorder(6, 10, 6, 10)
+                BorderFactory.createEmptyBorder(4, 8, 4, 8)
         ));
         chip.setOpaque(true);
         chip.setBackground(backgroundColor);
