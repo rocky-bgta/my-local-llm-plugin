@@ -2178,7 +2178,10 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
             return """
                     CORRECTION REQUIRED: Write the actual test file or file operation for the current repository.
                     Do not output a shell command, generic example, test plan, or clarifying question.
-                    Use the project's detected language and test framework. If the package folders are missing, create them in the file-operation path. %s
+                    Use the project's detected language and test framework.
+                    If you are writing a unit test for a single source file, infer the matching test path from the repository layout and write that exact file.
+                    If the package folders are missing, create them in the file-operation path.
+                    Create the file with a raw <CREATE_FILE> tag and complete content. %s
                     Output only the required XML file-operation tag with complete content.
                     """.formatted(targetNote).trim();
         }
