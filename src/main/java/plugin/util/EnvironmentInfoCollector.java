@@ -35,6 +35,13 @@ public class EnvironmentInfoCollector {
             String base = project.getBasePath();
             sb.append("- **Project path**: `").append(base).append("`\n");
             sb.append("- **Build tool**: ").append(detectBuildTool(base)).append("\n");
+            String containerStack = detectContainerStack(base);
+            if (!containerStack.isBlank()) {
+                sb.append("- **Container stack**: ").append(containerStack).append("\n");
+            }
+            sb.append("- **Primary language**: ").append(plugin.util.LanguageSupportUtil.detectPrimaryLanguage(project)).append("\n");
+            sb.append("- **Test framework hint**: ").append(plugin.util.LanguageSupportUtil.frameworkHint(
+                    plugin.util.LanguageSupportUtil.detectPrimaryLanguage(project))).append("\n");
         }
 
         String mavenOut = runCommand("mvn", "--version");
@@ -44,7 +51,7 @@ public class EnvironmentInfoCollector {
 
         if (includeShellNotes && osName.toLowerCase().contains("windows")) {
             sb.append("\n### Windows Shell Notes\n");
-            sb.append("- Unix commands (`head`, `tail`, `grep`, `find`) do **not** work in CMD/PowerShell\n");
+            sb.append("- Unix commands (`head`, `tail`, `grep`, `find`, `sed`, `awk`, `xargs`, `cat`) do **not** work in CMD/PowerShell\n");
             sb.append("- Use PowerShell equivalents: `Select-Object -First N`, `Select-String`, `Get-ChildItem -Recurse`\n");
             sb.append("- Path separator is `\\` (backslash); absolute paths start with drive letter: `C:\\...`\n");
             sb.append("- Pipe `|` passes objects in PowerShell, not text — behaviour differs from bash\n");
@@ -72,7 +79,29 @@ public class EnvironmentInfoCollector {
         if (new File(basePath, "Cargo.toml").exists())                 return "Cargo (Rust)";
         if (new File(basePath, "pyproject.toml").exists()
                 || new File(basePath, "requirements.txt").exists())    return "Python";
+        if (new File(basePath, "composer.json").exists())              return "PHP / Composer";
+        if (new File(basePath, "Gemfile").exists())                    return "Ruby / Bundler";
+        if (new File(basePath, "tsconfig.json").exists())              return "TypeScript";
+        if (hasAnyExtension(basePath, ".sln") || hasAnyExtension(basePath, ".csproj")) return ".NET";
         return "Unknown";
+    }
+
+    private static String detectContainerStack(String basePath) {
+        boolean docker = plugin.util.ContainerProjectUtil.hasDockerArtifacts(basePath);
+        boolean helm = plugin.util.ContainerProjectUtil.hasHelmArtifacts(basePath);
+        if (docker && helm) return "Docker + Helm";
+        if (docker) return "Docker";
+        if (helm) return "Helm";
+        return "";
+    }
+
+    private static boolean hasAnyExtension(String basePath, String extension) {
+        File[] files = new File(basePath).listFiles();
+        if (files == null) return false;
+        for (File file : files) {
+            if (file.getName().endsWith(extension)) return true;
+        }
+        return false;
     }
 
     private static String runCommand(String... cmd) {

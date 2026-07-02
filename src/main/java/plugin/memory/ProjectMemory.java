@@ -14,7 +14,6 @@ import java.util.concurrent.ConcurrentHashMap;
 
 public class ProjectMemory {
 
-    private static final String MEMORY_FILE = ".local-llm/project-memory.json";
     private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
 
     private final String basePath;
@@ -51,9 +50,11 @@ public class ProjectMemory {
     }
 
     private void load() {
-        Path path = Paths.get(basePath, MEMORY_FILE);
-        if (!Files.exists(path)) return;
-        try (Reader r = new InputStreamReader(Files.newInputStream(path), StandardCharsets.UTF_8)) {
+        Path path = InternalWorkspaceStore.projectMemoryFile(basePath);
+        Path legacyPath = InternalWorkspaceStore.legacyRoot(basePath).resolve("project-memory.json");
+        Path sourcePath = Files.exists(path) ? path : legacyPath;
+        if (!Files.exists(sourcePath)) return;
+        try (Reader r = new InputStreamReader(Files.newInputStream(sourcePath), StandardCharsets.UTF_8)) {
             Type type = new TypeToken<Map<String, String>>() {}.getType();
             Map<String, String> loaded = GSON.fromJson(r, type);
             if (loaded != null) facts.putAll(loaded);
@@ -62,7 +63,7 @@ public class ProjectMemory {
 
     private void save() {
         try {
-            Path path = Paths.get(basePath, MEMORY_FILE);
+            Path path = InternalWorkspaceStore.projectMemoryFile(basePath);
             Files.createDirectories(path.getParent());
             try (Writer w = new OutputStreamWriter(Files.newOutputStream(path), StandardCharsets.UTF_8)) {
                 GSON.toJson(facts, w);

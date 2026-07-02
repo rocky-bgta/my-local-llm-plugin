@@ -1,6 +1,7 @@
 package plugin.toolwindow;
 
 import com.intellij.openapi.project.Project;
+import com.intellij.openapi.util.Disposer;
 import com.intellij.openapi.wm.ToolWindow;
 import com.intellij.openapi.wm.ToolWindowFactory;
 import com.intellij.ui.content.Content;
@@ -16,6 +17,8 @@ public class ChatToolWindowFactory implements ToolWindowFactory {
         Content content = ContentFactory.getInstance()
                 .createContent(panel.getSwingComponent(), "New Chat", false);
         panel.setTabContent(content);
+        content.setDisposer(panel);
         toolWindow.getContentManager().addContent(content);
+        Disposer.register(content, panel);
     }
 }

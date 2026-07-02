@@ -4,21 +4,27 @@ import plugin.agent.AgentContext;
 import plugin.agent.AgentTask;
 import plugin.psi.ClassFinder;
 import plugin.psi.MethodFinder;
+import plugin.util.LanguageSupportUtil;
 
 import java.util.List;
-import java.util.stream.Collectors;
 
 public class TestGenerator {
 
     public String buildTestPrompt(AgentContext ctx, String targetClass) {
-        ClassFinder classFinder = new ClassFinder(ctx.getProject());
-        MethodFinder methodFinder = new MethodFinder(ctx.getProject());
+        LanguageSupportUtil.Language language = LanguageSupportUtil.detectPrimaryLanguage(ctx.getProject());
+        List<MethodFinder.MethodInfo> methods = List.of();
+        List<ClassFinder.ClassInfo> related = List.of();
 
-        List<MethodFinder.MethodInfo> methods = methodFinder.findPublicMethods(targetClass);
-        List<ClassFinder.ClassInfo> related = classFinder.findRelatedClasses(targetClass);
+        if (LanguageSupportUtil.isJvmLanguage(language)) {
+            ClassFinder classFinder = new ClassFinder(ctx.getProject());
+            MethodFinder methodFinder = new MethodFinder(ctx.getProject());
+            methods = methodFinder.findPublicMethods(targetClass);
+            related = classFinder.findRelatedClasses(targetClass);
+        }
 
         StringBuilder prompt = new StringBuilder();
-        prompt.append("Generate comprehensive JUnit 5 tests for `").append(targetClass).append("`.\n\n");
+        prompt.append("Generate comprehensive ").append(LanguageSupportUtil.frameworkHint(language))
+                .append(" tests for `").append(targetClass).append("`.\n\n");
 
         if (!methods.isEmpty()) {
             prompt.append("Public methods to test:\n");
@@ -35,15 +41,13 @@ public class TestGenerator {
 
         prompt.append("""
                 Requirements:
-                - Use JUnit 5 (@Test, @BeforeEach, @AfterEach)
-                - Use Mockito for dependencies
-                - Follow AAA pattern (Arrange, Act, Assert)
+                - Use the project's native test framework
+                - Follow the language's usual testing style and conventions
                 - Test happy path, edge cases, and error conditions
-                - The test package MUST match the source class package
-                - Place the file under the matching src/test/java/<package path>
+                - Place the file under the matching test location for the detected language
                 - Use XML tag: <CREATE_FILE path="<test path>/""").append(targetClass)
                 .append("""
-                Test.java">...</CREATE_FILE>
+                Test">...</CREATE_FILE>
                 """);
 
         return prompt.toString();
@@ -54,6 +58,6 @@ public class TestGenerator {
     }
 
     public String inferTestPath(String targetClass) {
-        return "src/test/java/plugin/" + targetClass + "Test.java";
+        return LanguageSupportUtil.suggestedTestPath("src/main/java/" + targetClass + ".java");
     }
 }

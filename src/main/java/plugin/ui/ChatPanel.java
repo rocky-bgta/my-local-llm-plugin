@@ -7,14 +7,19 @@ import com.intellij.openapi.util.Key;
 import com.intellij.ui.content.Content;
 import org.jetbrains.annotations.NotNull;
 import plugin.llm.LocalLLMClient;
+import plugin.llm.AttachmentData;
 import plugin.llm.model.ChatMessage;
+import plugin.integrations.IntegrationAccessUtil;
 import plugin.settings.PluginSettings;
 import plugin.agent.AgentTask;
 import plugin.agent.PlannerAgent;
 import plugin.llm.QwenPromptBuilder;
 import plugin.rag.ContextCollector;
 import plugin.rag.RetrievalResult;
+import plugin.memory.SkillMemory;
 import plugin.testing.AutoFixLoop;
+import plugin.tool.GitTool;
+import plugin.util.AttachmentUtil;
 import plugin.util.BuildUtil;
 import plugin.util.FileOperationUtil;
 import plugin.util.GitUtil;
@@ -25,10 +30,13 @@ import javax.swing.text.*;
 import java.awt.*;
 import java.awt.event.KeyAdapter;
 import java.awt.event.KeyEvent;
+import java.awt.datatransfer.DataFlavor;
+import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.List;
 
-public class ChatPanel {
+public class ChatPanel implements com.intellij.openapi.Disposable {
 
     // Lets actions (e.g. GenerateTestAction) reach the live panel for this project.
     public static final Key<ChatPanel> PANEL_KEY = Key.create("LocalLLM.ChatPanel");
@@ -46,8 +54,15 @@ public class ChatPanel {
 
     // Dynamic tab/toolbar title
     private JLabel  titleLabel;
+    private JLabel  workspaceStatusLabel;
+    private JLabel  activityLabel;
+    private JLabel  fileHistoryLabel;
+    private JLabel  gitStatusLabel;
+    private JProgressBar contextBar;
+    private String  workspaceProjectTypeLabel = "Unknown project";
     private Content tabContent;
     private boolean titleGenerated = false;
+    private int currentContextUsagePercent = 0;
 
     // Auto-fix loop state — reset on each new user message
     private int     buildFixAttempts       = 0;
@@ -65,7 +80,16 @@ public class ChatPanel {
     private JTextArea    promptArea;
     private JButton      sendBtn;
     private JButton      stopBtn;
+    private JButton      clearContextBtn;
+    private JButton      clearAttachmentsBtn;
     private JProgressBar spinner;
+    private JPanel       attachmentsPanel;
+    private JLabel       attachmentHintLabel;
+
+    private int estimatedInputTokens = 0;
+    private int estimatedOutputTokens = 0;
+    private static final int CONTEXT_BUDGET_TOKENS = 12_000;
+    private static final int MAX_PROMPT_HISTORY = 10;
 
     private volatile boolean isGenerating = false;
     private volatile boolean stopRequested = false;
@@ -79,12 +103,19 @@ public class ChatPanel {
 
     // Conversation history
     private final List<ChatMessage> history = new ArrayList<>();
+    private final List<String> promptHistory = new ArrayList<>();
+    private int promptHistoryIndex = -1;
+    private String promptHistoryDraft = "";
 
     // Track newly created files for Git
     private final List<String> newlyCreatedFiles = new ArrayList<>();
 
+    // Attachments dropped by the user for the next prompt
+    private final List<AttachmentData> pendingAttachments = new ArrayList<>();
+
     // Hybrid RAG: initialized lazily so it doesn't block the EDT constructor
     private volatile ContextCollector contextCollector;
+    private volatile SkillMemory skillMemory;
 
     // Text styles
     private Style userRoleStyle;
@@ -119,9 +150,15 @@ public class ChatPanel {
     public JTextArea getPromptArea() { return promptArea; }
     public JButton getSendBtn() { return sendBtn; }
     public JButton getStopBtn() { return stopBtn; }
+    public JButton getClearContextBtn() { return clearContextBtn; }
     public JProgressBar getSpinner() { return spinner; }
     public Timer getBlinkTimer() { return blinkTimer; }
     public JLabel getTitleLabel() { return titleLabel; }
+    public JLabel getWorkspaceStatusLabel() { return workspaceStatusLabel; }
+    public JLabel getActivityLabel() { return activityLabel; }
+    public JLabel getFileHistoryLabel() { return fileHistoryLabel; }
+    public JLabel getGitStatusLabel() { return gitStatusLabel; }
+    public JProgressBar getContextBar() { return contextBar; }
     public boolean isTitleGenerated() { return titleGenerated; }
     public int getBuildFixAttempts() { return buildFixAttempts; }
     public List<ChatMessage> getHistory() { return history; }
@@ -153,9 +190,33 @@ public class ChatPanel {
         modeCombo.setSelectedItem("PLANNING");
         modeCombo.addActionListener(e -> mode = (String) modeCombo.getSelectedItem());
 
-        JButton clearBtn = new JButton("New Chat");
-        clearBtn.setToolTipText("Clear chat display and reset conversation context (Ctrl+Shift+N)");
-        clearBtn.addActionListener(e -> clearConversation());
+        workspaceStatusLabel = new JLabel();
+        workspaceStatusLabel.setFont(workspaceStatusLabel.getFont().deriveFont(Font.PLAIN, 11f));
+        workspaceStatusLabel.setBorder(BorderFactory.createEmptyBorder(0, 6, 0, 6));
+        workspaceProjectTypeLabel = ChatPanelSupport.projectTypeLabel(project);
+        refreshWorkspaceStatus();
+
+        activityLabel = new JLabel();
+        activityLabel.setFont(activityLabel.getFont().deriveFont(Font.PLAIN, 11f));
+        activityLabel.setBorder(BorderFactory.createEmptyBorder(0, 6, 0, 6));
+
+        fileHistoryLabel = new JLabel();
+        fileHistoryLabel.setFont(fileHistoryLabel.getFont().deriveFont(Font.PLAIN, 11f));
+        fileHistoryLabel.setBorder(BorderFactory.createEmptyBorder(0, 6, 0, 6));
+
+        gitStatusLabel = new JLabel();
+        gitStatusLabel.setFont(gitStatusLabel.getFont().deriveFont(Font.PLAIN, 11f));
+        gitStatusLabel.setBorder(BorderFactory.createEmptyBorder(0, 6, 0, 6));
+
+        contextBar = new JProgressBar(0, 100);
+        contextBar.setStringPainted(true);
+        contextBar.setPreferredSize(new Dimension(120, 16));
+        refreshTelemetry("Ready", null);
+        refreshVersionControlStatus();
+
+        clearContextBtn = new JButton("Clear Context");
+        clearContextBtn.setToolTipText("Clear chat display and reset conversation context (Ctrl+Shift+N)");
+        clearContextBtn.addActionListener(e -> clearConversation());
 
         JButton gearBtn = new JButton(AllIcons.General.Settings);
         gearBtn.setBorderPainted(false);
@@ -167,9 +228,14 @@ public class ChatPanel {
 
         JPanel right = new JPanel(new FlowLayout(FlowLayout.RIGHT, 6, 0));
         right.setOpaque(false);
+        right.add(activityLabel);
         right.add(new JLabel("Mode:"));
         right.add(modeCombo);
-        right.add(clearBtn);
+        right.add(workspaceStatusLabel);
+        right.add(contextBar);
+        right.add(fileHistoryLabel);
+        right.add(gitStatusLabel);
+        right.add(clearContextBtn);
         right.add(gearBtn);
         bar.add(right, BorderLayout.EAST);
 
@@ -183,11 +249,13 @@ public class ChatPanel {
     private void showSettingsDialog() {
         Window parent = SwingUtilities.getWindowAncestor(root);
         JDialog dialog = new JDialog(parent, "Settings", Dialog.ModalityType.APPLICATION_MODAL);
-        dialog.add(buildSettingsForm(dialog));
+        JScrollPane scrollPane = new JScrollPane(buildSettingsForm(dialog));
+        scrollPane.setBorder(BorderFactory.createEmptyBorder());
+        dialog.setContentPane(scrollPane);
         dialog.pack();
-        dialog.setMinimumSize(new Dimension(380, dialog.getHeight()));
+        dialog.setMinimumSize(new Dimension(720, 640));
         dialog.setLocationRelativeTo(root);
-        dialog.setResizable(false);
+        dialog.setResizable(true);
         dialog.setVisible(true);
     }
 
@@ -200,8 +268,25 @@ public class ChatPanel {
         JButton           refreshBtn    = new JButton("Refresh Models");
         JButton           saveBtn       = new JButton("Save");
         JCheckBox         contextCheck  = new JCheckBox("Include full file contents in context", s.isIncludeFullContext());
+        JTextField        gitlabCliPathField = new JTextField(s.getGitlabCliPath(), 28);
+        JTextField        gitlabProjectField = new JTextField(s.getGitlabProject(), 28);
+        JTextField        gitlabApiUrlField  = new JTextField(s.getGitlabApiUrl(), 28);
+        JPasswordField    gitlabTokenField   = new JPasswordField(s.getGitlabToken(), 28);
+        JTextField        jiraBaseUrlField   = new JTextField(s.getJiraBaseUrl(), 28);
+        JTextField        jiraEmailField     = new JTextField(s.getJiraEmail(), 28);
+        JPasswordField    jiraTokenField     = new JPasswordField(s.getJiraToken(), 28);
+        JTextField        mcpServerUrlField  = new JTextField(s.getMcpServerUrl(), 28);
+        JTextField        mcpProtocolField   = new JTextField(s.getMcpProtocolVersion(), 28);
+        JLabel            integrationStatusLabel = new JLabel(" ");
+        JButton           testGitLabBtn     = new JButton("Test GitLab");
+        JButton           testJiraBtn        = new JButton("Test Jira");
+        JButton           testMcpBtn         = new JButton("Test MCP");
+        JButton           testDockerBtn      = new JButton("Test Docker");
+        JButton           testHelmBtn        = new JButton("Test Helm");
+        JButton           manageSkillsBtn   = new JButton("Manage Skills");
 
         statusLabel.setFont(statusLabel.getFont().deriveFont(Font.ITALIC, 11f));
+        integrationStatusLabel.setFont(integrationStatusLabel.getFont().deriveFont(Font.ITALIC, 11f));
 
         if (s.getModel() != null && !s.getModel().isBlank()) {
             modelCombo.addItem(s.getModel());
@@ -233,11 +318,94 @@ public class ChatPanel {
             });
         });
 
+        testGitLabBtn.addActionListener(e -> runIntegrationTest(
+                testGitLabBtn,
+                integrationStatusLabel,
+                "GitLab",
+                () -> IntegrationAccessUtil.testGitLab(snapshotSettings(
+                        endpointField.getText(),
+                        modelCombo,
+                        contextCheck,
+                        gitlabCliPathField,
+                        gitlabProjectField,
+                        gitlabApiUrlField,
+                        gitlabTokenField,
+                        jiraBaseUrlField,
+                        jiraEmailField,
+                        jiraTokenField,
+                        mcpServerUrlField,
+                        mcpProtocolField
+                ))));
+
+        testJiraBtn.addActionListener(e -> runIntegrationTest(
+                testJiraBtn,
+                integrationStatusLabel,
+                "Jira",
+                () -> IntegrationAccessUtil.testJira(snapshotSettings(
+                        endpointField.getText(),
+                        modelCombo,
+                        contextCheck,
+                        gitlabCliPathField,
+                        gitlabProjectField,
+                        gitlabApiUrlField,
+                        gitlabTokenField,
+                        jiraBaseUrlField,
+                        jiraEmailField,
+                        jiraTokenField,
+                        mcpServerUrlField,
+                        mcpProtocolField
+                ))));
+
+        testMcpBtn.addActionListener(e -> runIntegrationTest(
+                testMcpBtn,
+                integrationStatusLabel,
+                "MCP",
+                () -> IntegrationAccessUtil.testMcp(snapshotSettings(
+                        endpointField.getText(),
+                        modelCombo,
+                        contextCheck,
+                        gitlabCliPathField,
+                        gitlabProjectField,
+                        gitlabApiUrlField,
+                        gitlabTokenField,
+                        jiraBaseUrlField,
+                        jiraEmailField,
+                        jiraTokenField,
+                        mcpServerUrlField,
+                        mcpProtocolField
+                ))));
+
+        testDockerBtn.addActionListener(e -> runIntegrationTest(
+                testDockerBtn,
+                integrationStatusLabel,
+                "Docker",
+                IntegrationAccessUtil::testDocker));
+
+        testHelmBtn.addActionListener(e -> runIntegrationTest(
+                testHelmBtn,
+                integrationStatusLabel,
+                "Helm",
+                IntegrationAccessUtil::testHelm));
+
+        manageSkillsBtn.addActionListener(e -> {
+            Window window = SwingUtilities.getWindowAncestor(dialog);
+            SkillManagerDialog.show(window, getSkillMemory());
+        });
+
         saveBtn.addActionListener(e -> {
             s.setEndpoint(endpointField.getText().trim());
             s.setIncludeFullContext(contextCheck.isSelected());
             Object sel = modelCombo.getSelectedItem();
             if (sel != null && !sel.toString().isBlank()) s.setModel(sel.toString());
+            s.setGitlabCliPath(gitlabCliPathField.getText().trim());
+            s.setGitlabProject(gitlabProjectField.getText().trim());
+            s.setGitlabApiUrl(gitlabApiUrlField.getText().trim());
+            s.setGitlabToken(new String(gitlabTokenField.getPassword()).trim());
+            s.setJiraBaseUrl(jiraBaseUrlField.getText().trim());
+            s.setJiraEmail(jiraEmailField.getText().trim());
+            s.setJiraToken(new String(jiraTokenField.getPassword()).trim());
+            s.setMcpServerUrl(mcpServerUrlField.getText().trim());
+            s.setMcpProtocolVersion(mcpProtocolField.getText().trim());
             dialog.dispose();
         });
 
@@ -258,8 +426,29 @@ public class ChatPanel {
         fc.gridy = 1; form.add(refreshBtn,  fc);
         addFormRow(form, "Model:",    modelCombo,    lc, fc, 2);
         fc.gridy = 3; form.add(contextCheck, fc);
-        fc.gridy = 4; form.add(saveBtn,     fc);
-        fc.gridy = 5; form.add(statusLabel, fc);
+        addSectionHeader(form, "Integrations", lc, fc, 4);
+        addFormRow(form, "GitLab CLI:", gitlabCliPathField, lc, fc, 5);
+        addFormRow(form, "GitLab project:", gitlabProjectField, lc, fc, 6);
+        addFormRow(form, "GitLab API URL:", gitlabApiUrlField, lc, fc, 7);
+        addFormRow(form, "GitLab token:", gitlabTokenField, lc, fc, 8);
+        fc.gridy = 9; form.add(testGitLabBtn, fc);
+        addFormRow(form, "Jira base URL:", jiraBaseUrlField, lc, fc, 10);
+        addFormRow(form, "Jira email:", jiraEmailField, lc, fc, 11);
+        addFormRow(form, "Jira token:", jiraTokenField, lc, fc, 12);
+        fc.gridy = 13; form.add(testJiraBtn, fc);
+        addFormRow(form, "MCP server URL:", mcpServerUrlField, lc, fc, 14);
+        addFormRow(form, "MCP protocol:", mcpProtocolField, lc, fc, 15);
+        fc.gridy = 16;
+        JPanel mcpButtonRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 0));
+        mcpButtonRow.setOpaque(false);
+        mcpButtonRow.add(testMcpBtn);
+        mcpButtonRow.add(testDockerBtn);
+        mcpButtonRow.add(testHelmBtn);
+        mcpButtonRow.add(manageSkillsBtn);
+        form.add(mcpButtonRow, fc);
+        fc.gridy = 17; form.add(saveBtn,     fc);
+        fc.gridy = 18; form.add(statusLabel, fc);
+        fc.gridy = 19; form.add(integrationStatusLabel, fc);
 
         return form;
     }
@@ -268,6 +457,72 @@ public class ChatPanel {
                                    GridBagConstraints lc, GridBagConstraints fc, int row) {
         lc.gridx = 0; lc.gridy = row; p.add(new JLabel(label), lc);
         fc.gridx = 1; fc.gridy = row; p.add(field, fc);
+    }
+
+    private static void addSectionHeader(JPanel p, String text, GridBagConstraints lc, GridBagConstraints fc, int row) {
+        JLabel header = new JLabel(text);
+        header.setFont(header.getFont().deriveFont(Font.BOLD, 12f));
+        lc.gridx = 0;
+        lc.gridy = row;
+        lc.gridwidth = GridBagConstraints.REMAINDER;
+        lc.insets = new Insets(12, 0, 2, 0);
+        p.add(header, lc);
+        lc.gridwidth = 1;
+        lc.insets = new Insets(5, 0, 5, 10);
+        fc.gridy = row;
+    }
+
+    private static PluginSettings snapshotSettings(String endpoint,
+                                                   JComboBox<String> modelCombo,
+                                                   JCheckBox contextCheck,
+                                                   JTextField gitlabCliPathField,
+                                                   JTextField gitlabProjectField,
+                                                   JTextField gitlabApiUrlField,
+                                                   JPasswordField gitlabTokenField,
+                                                   JTextField jiraBaseUrlField,
+                                                   JTextField jiraEmailField,
+                                                   JPasswordField jiraTokenField,
+                                                   JTextField mcpServerUrlField,
+                                                   JTextField mcpProtocolField) {
+        PluginSettings snapshot = new PluginSettings();
+        snapshot.setEndpoint(endpoint == null ? "" : endpoint.trim());
+        Object model = modelCombo.getSelectedItem();
+        if (model != null) {
+            snapshot.setModel(model.toString().trim());
+        }
+        snapshot.setIncludeFullContext(contextCheck.isSelected());
+        snapshot.setGitlabCliPath(gitlabCliPathField.getText().trim());
+        snapshot.setGitlabProject(gitlabProjectField.getText().trim());
+        snapshot.setGitlabApiUrl(gitlabApiUrlField.getText().trim());
+        snapshot.setGitlabToken(new String(gitlabTokenField.getPassword()).trim());
+        snapshot.setJiraBaseUrl(jiraBaseUrlField.getText().trim());
+        snapshot.setJiraEmail(jiraEmailField.getText().trim());
+        snapshot.setJiraToken(new String(jiraTokenField.getPassword()).trim());
+        snapshot.setMcpServerUrl(mcpServerUrlField.getText().trim());
+        snapshot.setMcpProtocolVersion(mcpProtocolField.getText().trim());
+        return snapshot;
+    }
+
+    private static void runIntegrationTest(JButton button,
+                                           JLabel statusLabel,
+                                           String integrationName,
+                                           java.util.function.Supplier<IntegrationAccessUtil.IntegrationTestResult> task) {
+        button.setEnabled(false);
+        statusLabel.setText(integrationName + ": testing…");
+        daemon(() -> {
+            IntegrationAccessUtil.IntegrationTestResult result;
+            try {
+                result = task.get();
+            } catch (Exception ex) {
+                result = new IntegrationAccessUtil.IntegrationTestResult(false, ex.getMessage());
+            }
+            final IntegrationAccessUtil.IntegrationTestResult finalResult = result;
+            SwingUtilities.invokeLater(() -> {
+                button.setEnabled(true);
+                statusLabel.setText(IntegrationAccessUtil.summarizeResult(integrationName, finalResult));
+                statusLabel.setToolTipText(statusLabel.getText());
+            });
+        });
     }
 
     // -------------------------------------------------------------------------
@@ -333,11 +588,27 @@ public class ChatPanel {
                 BorderFactory.createEmptyBorder(8, 12, 12, 12)
         ));
 
+        attachmentsPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 6));
+        attachmentsPanel.setOpaque(false);
+        Color attachmentBorderColor = UIManager.getColor("Separator.foreground");
+        if (attachmentBorderColor == null) attachmentBorderColor = Color.GRAY;
+        attachmentsPanel.setBorder(BorderFactory.createCompoundBorder(
+                BorderFactory.createLineBorder(attachmentBorderColor),
+                BorderFactory.createEmptyBorder(8, 8, 8, 8)
+        ));
+        attachmentHintLabel = new JLabel("Drop images or files here to attach them to the next prompt.");
+        attachmentHintLabel.setFont(attachmentHintLabel.getFont().deriveFont(Font.ITALIC, 11f));
+        attachmentHintLabel.setForeground(UIManager.getColor("Label.disabledForeground"));
+        attachmentsPanel.add(attachmentHintLabel);
+        attachmentsPanel.setTransferHandler(buildAttachmentTransferHandler());
+        refreshAttachmentStrip();
+
         promptArea = new JTextArea(4, 0);
         promptArea.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 16));
         promptArea.setLineWrap(true);
         promptArea.setWrapStyleWord(true);
         promptArea.setMargin(new Insets(6, 8, 6, 8));
+        promptArea.setToolTipText("Type a prompt, or drag and drop files above to attach them.");
         // Enter = send   |   Shift+Enter = newline
         promptArea.addKeyListener(new KeyAdapter() {
             @Override
@@ -350,6 +621,30 @@ public class ChatPanel {
                         e.consume();
                         sendMessage();
                     }
+                    return;
+                }
+
+                if (e.getKeyCode() == KeyEvent.VK_UP || e.getKeyCode() == KeyEvent.VK_DOWN) {
+                    if (shouldUsePromptHistoryNavigation(e.getKeyCode())) {
+                        e.consume();
+                        boolean up = e.getKeyCode() == KeyEvent.VK_UP;
+                        ChatPanelSupport.PromptHistoryState state = ChatPanelSupport.navigatePromptHistory(
+                                promptHistory,
+                                promptArea.getText(),
+                                promptHistoryIndex,
+                                promptHistoryDraft,
+                                up
+                        );
+                        promptHistoryIndex = state.index();
+                        promptHistoryDraft = state.draft();
+                        promptArea.setText(state.displayedText());
+                        promptArea.setCaretPosition(promptArea.getText().length());
+                        return;
+                    }
+                }
+
+                if (shouldResetPromptHistoryNavigation(e)) {
+                    resetPromptHistoryNavigation();
                 }
             }
         });
@@ -357,6 +652,9 @@ public class ChatPanel {
         JScrollPane promptScroll = new JScrollPane(promptArea);
         promptScroll.setVerticalScrollBarPolicy(ScrollPaneConstants.VERTICAL_SCROLLBAR_AS_NEEDED);
         promptScroll.setHorizontalScrollBarPolicy(ScrollPaneConstants.HORIZONTAL_SCROLLBAR_NEVER);
+        promptScroll.setTransferHandler(buildAttachmentTransferHandler());
+        promptArea.setTransferHandler(buildAttachmentTransferHandler());
+        root.setTransferHandler(buildAttachmentTransferHandler());
 
         sendBtn = new JButton("Send");
         sendBtn.setPreferredSize(new Dimension(80, 28));
@@ -374,9 +672,10 @@ public class ChatPanel {
             setLoading(false);
         });
 
-        JButton clearBtn = new JButton("New Chat");
-        clearBtn.setToolTipText("Clear chat display and reset conversation context (Ctrl+Shift+N)");
-        clearBtn.addActionListener(e -> clearConversation());
+        clearAttachmentsBtn = new JButton("Clear Attachments");
+        clearAttachmentsBtn.setToolTipText("Remove all dropped attachments before sending");
+        clearAttachmentsBtn.addActionListener(e -> clearAttachments());
+        clearAttachmentsBtn.setVisible(false);
 
         spinner = new JProgressBar();
         spinner.setIndeterminate(false);
@@ -385,7 +684,7 @@ public class ChatPanel {
 
         JPanel ctrlRow  = new JPanel(new BorderLayout(4, 0));
         JPanel leftCtrl = new JPanel(new FlowLayout(FlowLayout.LEFT, 4, 0));
-        leftCtrl.add(clearBtn);
+        leftCtrl.add(clearAttachmentsBtn);
         leftCtrl.add(spinner);
         ctrlRow.add(leftCtrl, BorderLayout.WEST);
         JPanel rightCtrl = new JPanel(new FlowLayout(FlowLayout.RIGHT, 4, 0));
@@ -393,6 +692,7 @@ public class ChatPanel {
         rightCtrl.add(sendBtn);
         ctrlRow.add(rightCtrl, BorderLayout.EAST);
 
+        panel.add(attachmentsPanel, BorderLayout.NORTH);
         panel.add(promptScroll, BorderLayout.CENTER);
         panel.add(ctrlRow,      BorderLayout.SOUTH);
         return panel;
@@ -404,7 +704,14 @@ public class ChatPanel {
 
     private void sendMessage() {
         String text = promptArea.getText().trim();
-        if (text.isEmpty()) return;
+        List<AttachmentData> attachments = pendingAttachments.isEmpty()
+                ? List.of()
+                : new ArrayList<>(pendingAttachments);
+        if (text.isEmpty() && attachments.isEmpty()) return;
+        if (text.isEmpty()) {
+            text = AttachmentUtil.suggestedUserPrompt(attachments);
+        }
+        recordPromptHistory(text);
         newlyCreatedFiles.clear();
         buildFixAttempts       = 0;
         lastCompileFingerprint = "";
@@ -421,16 +728,40 @@ public class ChatPanel {
             return;
         }
 
+        if (ChatPanelSupport.isGitAddCreatedFilesIntent(text)) {
+            if (newlyCreatedFiles.isEmpty()) {
+                appendSystemMessage("No tracked created files are available to add to Git.");
+                return;
+            }
+            appendSystemMessage("Created files:\n- " + String.join("\n- ", newlyCreatedFiles));
+            scheduleGitAdd();
+            promptArea.setText("");
+            return;
+        }
+
         // Auto-switch to EDITING for tasks that require file changes
         AgentTask.TaskType detectedType = new PlannerAgent().detectTaskType(text);
+        boolean patchAttachment = AttachmentUtil.containsPatchAttachment(attachments);
+        boolean jiraAttachment = AttachmentUtil.containsJiraTicketAttachment(attachments);
+        boolean angularIntent = AttachmentUtil.containsAngularBuildIntent(text);
+        boolean readmeIntent = ChatPanelSupport.isReadmeIntent(text);
+        boolean containerIntent = ChatPanelSupport.isDockerOrHelmIntent(text);
         if ("PLANNING".equals(mode) && modeCombo != null
                 && (detectedType == AgentTask.TaskType.GENERATE_TESTS
                     || detectedType == AgentTask.TaskType.FIX_BUG
                     || detectedType == AgentTask.TaskType.ADD_FEATURE
-                    || detectedType == AgentTask.TaskType.REFACTOR)) {
+                    || detectedType == AgentTask.TaskType.REVIEW_COMMIT
+                    || detectedType == AgentTask.TaskType.REFACTOR
+                    || detectedType == AgentTask.TaskType.DOCUMENT
+                    || patchAttachment
+                    || jiraAttachment
+                    || angularIntent
+                    || containerIntent
+                    || readmeIntent)) {
             modeCombo.setSelectedItem("EDITING");
             appendSystemMessage("Auto-switched to EDITING mode.");
         }
+        refreshTelemetry("Thinking", null);
 
         // Add system message with context if history is empty or it's a new conversation
         if (history.isEmpty()) {
@@ -438,18 +769,46 @@ public class ChatPanel {
             String context = buildRagContext(text);
             String corrections = plugin.util.LLMCorrectionsUtil.loadCorrectionsForPrompt(project.getBasePath());
             // QwenPromptBuilder: compact system prompt tuned for Qwen2.5-Coder-7B/VL-7B
-            String systemInstructions = QwenPromptBuilder.buildSystemPrompt(mode, corrections);
-            
-            history.add(new ChatMessage("system", systemInstructions));
-
             String envInfo = plugin.util.EnvironmentInfoCollector.collectForPrompt(project);
-            history.add(new ChatMessage("user", "Developer Environment Info:\n" + envInfo));
-            history.add(new ChatMessage("assistant", "Environment information loaded."));
+            String memoryInfo = buildMemoryContext(text, attachments);
+            if (readmeIntent) {
+                String readmeContext = ChatPanelSupport.buildReadmeContext(project);
+                if (!readmeContext.isBlank()) {
+                    if (!memoryInfo.isBlank()) {
+                        memoryInfo += "\n\n";
+                    }
+                    memoryInfo += readmeContext;
+                }
+            }
+            String containerInfo = ChatPanelSupport.buildContainerContext(project);
+            if (!containerInfo.isBlank()) {
+                if (!memoryInfo.isBlank()) {
+                    memoryInfo += "\n\n";
+                }
+                memoryInfo += containerInfo;
+            }
+            String reviewContext = buildReviewContext(text, attachments);
+            if (!reviewContext.isBlank()) {
+                if (!memoryInfo.isBlank()) {
+                    memoryInfo += "\n\n";
+                }
+                memoryInfo += "# Commit Review\n" + reviewContext;
+            }
+            String integrationInfo = IntegrationAccessUtil.buildPromptSummary(s);
+            if (integrationInfo != null && !integrationInfo.isBlank()) {
+                if (!memoryInfo.isBlank()) {
+                    memoryInfo += "\n\n";
+                }
+                memoryInfo += "# Integrations\n" + integrationInfo;
+            }
+            String systemInstructions = QwenPromptBuilder.buildSystemPrompt(mode, corrections, envInfo, memoryInfo);
+
+            history.add(new ChatMessage("system", systemInstructions));
 
             // Inject RAG context (already focused — usually fits in one block)
             if (!context.isBlank()) {
                 if (context.length() > 6000) {
-                    List<String> chunks = splitIntoChunks(context, 6000);
+                    List<String> chunks = ChatPanelSupport.splitIntoChunks(context, 6000);
                     for (int i = 0; i < chunks.size(); i++) {
                         history.add(new ChatMessage("user", "Retrieved Context (Part " + (i + 1) + "/" + chunks.size() + "):\n" + chunks.get(i)));
                         history.add(new ChatMessage("assistant", "Received context part " + (i + 1) + ". Please continue."));
@@ -468,11 +827,45 @@ public class ChatPanel {
             }
         }
 
+        if (ChatPanelSupport.isProjectStructureIntent(text)) {
+            String structure = ChatPanelSupport.buildProjectStructureContext(project);
+            if (structure.isBlank()) {
+                appendSystemMessage("Project structure is unavailable for this workspace.");
+                setLoading(false);
+                return;
+            }
+            estimatedInputTokens += ChatPanelSupport.estimateTokens(text);
+            estimatedOutputTokens += ChatPanelSupport.estimateTokens(structure);
+            refreshWorkspaceStatus();
+            appendUserMessage(text);
+            history.add(new ChatMessage("user", text));
+            appendAssistantMessage(structure);
+            history.add(new ChatMessage("assistant", structure));
+
+            promptArea.setText("");
+            pendingAttachments.clear();
+            refreshAttachmentStrip();
+            resetPromptHistoryNavigation();
+            if (!titleGenerated && text != null) {
+                titleGenerated = true;
+                generateTitle(text);
+            }
+            refreshTelemetry("Idle", null);
+            setLoading(false);
+            return;
+        }
+
         appendUserMessage(text);
+        if (!attachments.isEmpty()) {
+            String attachmentBlock = AttachmentUtil.buildPromptBlock(attachments);
+            if (!attachmentBlock.isBlank()) {
+                history.add(new ChatMessage("user", attachmentBlock));
+            }
+        }
         
         // Split large user message into chunks if necessary (max 6000 chars per part)
         if (text.length() > 6000) {
-            List<String> chunks = splitIntoChunks(text, 6000);
+            List<String> chunks = ChatPanelSupport.splitIntoChunks(text, 6000);
             for (int i = 0; i < chunks.size() - 1; i++) {
                 history.add(new ChatMessage("user", "Message Part " + (i + 1) + "/" + chunks.size() + ":\n" + chunks.get(i)));
                 history.add(new ChatMessage("assistant", "Part " + (i + 1) + " received. Please send the next part."));
@@ -483,47 +876,41 @@ public class ChatPanel {
         }
 
         promptArea.setText("");
+        pendingAttachments.clear();
+        refreshAttachmentStrip();
+        resetPromptHistoryNavigation();
+
+        if (shouldRememberSkill(text, attachments)) {
+            rememberSkillFromPrompt(text, attachments);
+        }
 
         beginAssistantMessage();
         blinkTimer.start();
         setLoading(true);
 
-        streamAndHandle(model, endpoint, text, true, detectedType);
+        streamAndHandle(model, endpoint, text, true, detectedType, attachments);
     }
 
     private void streamAndHandle(String model, String endpoint, String userText, boolean canRetry, AgentTask.TaskType taskType) {
+        streamAndHandle(model, endpoint, userText, canRetry, taskType, List.of());
+    }
+
+    private void streamAndHandle(String model, String endpoint, String userText, boolean canRetry, AgentTask.TaskType taskType,
+                                 List<AttachmentData> attachments) {
+        workspaceProjectTypeLabel = ChatPanelSupport.projectTypeLabel(project);
+        refreshTelemetry("Thinking", null);
         List<ChatMessage> snapshot = new ArrayList<>(history);
         // History management: preserve system prompt, initial project context, and recent conversation
-        if (snapshot.size() > 30) {
-            List<ChatMessage> trimmed = new ArrayList<>();
-            // 1. Always keep the system prompt (instruction)
-            trimmed.add(snapshot.get(0));
-            
-            // 2. Keep RAG context injection messages at the start of the conversation
-            int lastContextIndex = 0;
-            for (int i = 1; i < snapshot.size(); i++) {
-                String content = snapshot.get(i).content();
-                if (content != null && (content.contains("Retrieved Context") || content.contains("Received context part")
-                        || content.contains("Project Context") || content.contains("Received project context"))) {
-                    trimmed.add(snapshot.get(i));
-                    lastContextIndex = i;
-                }
-            }
-            
-            // 3. Keep the most recent messages for conversation continuity
-            int recentCount = 20;
-            int startOfRecent = Math.max(lastContextIndex + 1, snapshot.size() - recentCount);
-            for (int i = startOfRecent; i < snapshot.size(); i++) {
-                trimmed.add(snapshot.get(i));
-            }
-            snapshot = trimmed;
-        }
+        snapshot = ChatPanelSupport.trimConversationHistory(snapshot, CONTEXT_BUDGET_TOKENS);
 
         List<ChatMessage> finalSnapshot = snapshot;
+        estimatedInputTokens += ChatPanelSupport.estimateTokens(finalSnapshot);
+        refreshWorkspaceStatus();
+        refreshTelemetry("Thinking", finalSnapshot);
         currentChatThread = new Thread(() -> {
             try {
                 stopRequested = false;
-                new LocalLLMClient(endpoint).streamChat(model, finalSnapshot,
+                new LocalLLMClient(endpoint).streamChat(model, finalSnapshot, attachments,
                         token -> {
                             if (stopRequested) throw new RuntimeException("STREAM_INTERRUPTED");
                             SwingUtilities.invokeLater(() -> appendToken(token));
@@ -538,7 +925,16 @@ public class ChatPanel {
                         generateTitle(userText);
                     }
 
-                    if ("EDITING".equals(mode)) {
+                    maybeUpdateSkillFromSession(userText, fullResponse, attachments);
+
+                    if (taskType == AgentTask.TaskType.REVIEW_COMMIT) {
+                        refreshTelemetry("Reviewing", finalSnapshot);
+                        maybePublishGitLabReview(userText, fullResponse);
+                        if ("PLANNING".equals(mode)) {
+                            appendSystemMessage("Commit review completed in planning mode. No files were changed.");
+                        }
+                    } else if ("EDITING".equals(mode)) {
+                        refreshTelemetry("Working", finalSnapshot);
                         String responseLower = fullResponse.toLowerCase();
                         boolean hasFileOps = fullResponse.contains("<CREATE_FILE") ||
                                              fullResponse.contains("<MODIFY_FILE") ||
@@ -558,12 +954,12 @@ public class ChatPanel {
                             appendSystemMessage("⚠ XML tags detected with wrong case — tags must be UPPERCASE (e.g. <MODIFY_FILE>, not <modify_file>). Auto-correcting…");
                             history.add(new ChatMessage("user",
                                     "CORRECTION REQUIRED: You used lowercase XML tags. All file operation tags must be UPPERCASE:\n" +
-                                    "<MODIFY_FILE path=\"src/test/java/plugin/ChatMessageTest.java\">complete content</MODIFY_FILE>\n" +
-                                    "<CREATE_FILE path=\"src/test/java/plugin/NewTest.java\">complete content</CREATE_FILE>\n" +
+                                    "<MODIFY_FILE path=\"<detected-path>\">complete content</MODIFY_FILE>\n" +
+                                    "<CREATE_FILE path=\"<detected-path>\">complete content</CREATE_FILE>\n" +
                                     "Re-send your response using UPPERCASE tags with the complete file content inside."));
                             beginAssistantMessage();
                             blinkTimer.start();
-                            streamAndHandle(model, endpoint, null, false, taskType);
+                            streamAndHandle(model, endpoint, null, false, taskType, attachments);
                         } else if (hasFileOps || hasTests || hasCustomCommand) {
                             FileOperationUtil.FileOpResult opResult = FileOperationUtil.processFileOperations(project, fullResponse);
                             if (opResult.createdFiles != null) {
@@ -574,17 +970,15 @@ public class ChatPanel {
                                 injectBlockedWriteFeedback(opResult.warnings);
                             }
                             recordMistakes(opResult.mistakeKeys);
+                            refreshVersionControlStatus();
                             if (opResult.runTests) {
-                                if (opResult.testName != null) {
-                                    appendSystemMessage("Test execution requested for " + opResult.testName + ". Running tests…");
-                                    scheduleTestRun(model, endpoint, opResult.testName, taskType);
-                                } else {
-                                    appendSystemMessage("Test execution requested. Running tests…");
-                                    scheduleTestRun(model, endpoint, null, taskType);
-                                }
+                                appendSystemMessage("File operations applied. Running build check before tests…");
+                                refreshTelemetry("Debugging", finalSnapshot);
+                                scheduleBuildCheck(model, endpoint, taskType, true, opResult.testName);
                             } else if (opResult.checkCompilation) {
                                 appendSystemMessage("Compilation check requested. Running build…");
-                                scheduleBuildCheck(model, endpoint, taskType);
+                                refreshTelemetry("Debugging", finalSnapshot);
+                                scheduleBuildCheck(model, endpoint, taskType, false, null);
                             } else if (opResult.customCommand != null) {
                                 if (taskType == AgentTask.TaskType.GENERATE_TESTS
                                         && plugin.util.CommandIntentUtil.isStructureInspectionCommand(opResult.customCommand)) {
@@ -593,25 +987,39 @@ public class ChatPanel {
                                     history.add(new ChatMessage("user",
                                             "CORRECTION REQUIRED: You used a directory listing command instead of writing tests. " +
                                             "Do NOT inspect the tree with EXECUTE_COMMAND. " +
-                                            "Use <CREATE_FILE> or <MODIFY_FILE> to write a Java 21 JUnit 5 test directly. " +
-                                            "If no class is named, choose the most relevant source class from the retrieved context and write its test file now."));
+                                            "Use <CREATE_FILE> or <MODIFY_FILE> to write a test directly in the project's detected language and test framework. " +
+                                            "If no symbol is named, choose the most relevant source file from the retrieved context and write its test file now."));
                                     beginAssistantMessage();
                                     blinkTimer.start();
-                                    streamAndHandle(model, endpoint, null, false, taskType);
+                                    streamAndHandle(model, endpoint, null, false, taskType, attachments);
+                                    return;
+                                }
+                                if (!plugin.util.CommandIntentUtil.isCommandCompatibleWithCurrentPlatform(opResult.customCommand)) {
+                                    recordMistakes(java.util.List.of("shell-incompatibility"));
+                                    appendSystemMessage("⚠ Shell-incompatible command detected for this OS — auto-correcting…");
+                                    history.add(new ChatMessage("user",
+                                            "CORRECTION REQUIRED: The previous command is not compatible with the current operating system. " +
+                                            "Rewrite it using commands that work on this platform. " +
+                                            "If this is Windows, use PowerShell equivalents. If this is Linux or macOS, use Unix shell commands."));
+                                    beginAssistantMessage();
+                                    blinkTimer.start();
+                                    streamAndHandle(model, endpoint, null, false, taskType, attachments);
                                     return;
                                 }
                                 appendSystemMessage("Custom command execution requested: " + opResult.customCommand + ". Running…");
+                                refreshTelemetry("Running command", finalSnapshot);
                                 scheduleCustomCommand(opResult.customCommand);
                             } else if (hasFileOps) {
                                 appendSystemMessage("File operations applied. Running build check…");
-                                scheduleBuildCheck(model, endpoint, taskType);
+                                refreshTelemetry("Debugging", finalSnapshot);
+                                scheduleBuildCheck(model, endpoint, taskType, taskType == AgentTask.TaskType.GENERATE_TESTS, null);
                             }
 
                             if (fullResponse.contains("<GIT_ADD_NEW")) {
                                 scheduleGitAdd();
                             }
                             return;
-                        } else if (canRetry && (isFileOpIntent(userText) || fullResponse.contains("```"))) {
+                        } else if (canRetry && (ChatPanelSupport.isFileOpIntent(userText) || fullResponse.contains("```"))) {
                             // Model either used a code block or gave plain text — auto-correct once.
                             // Trigger also when LLM responded with code blocks regardless of user phrasing
                             // (e.g. user said "yes" or "add test case" and LLM replied with markdown).
@@ -624,27 +1032,12 @@ public class ChatPanel {
                             appendSystemMessage("⚠ Model did not use XML tags — auto-correcting…");
                             history.add(new ChatMessage("user",
                                     correction +
-                                    "You MUST re-send your response as a raw XML tag with REAL Java code inside it. " +
-                                    "This project is Java 21 Maven — write Java, not Go, not Python.\n" +
-                                    "Copy this exact structure and fill in your Java code:\n\n" +
-                                    "<MODIFY_FILE path=\"src/test/java/plugin/LocalLLMClientTest.java\">\n" +
-                                    "package plugin;\n\n" +
-                                    "import org.junit.jupiter.api.Test;\n" +
-                                    "import plugin.llm.LocalLLMClient;\n" +
-                                    "import plugin.llm.model.ChatMessage;\n" +
-                                    "import java.util.List;\n" +
-                                    "import static org.junit.jupiter.api.Assertions.*;\n\n" +
-                                    "public class LocalLLMClientTest {\n\n" +
-                                    "    @Test\n" +
-                                    "    void yourTestMethod() {\n" +
-                                    "        // REPLACE THIS with real Java test logic\n" +
-                                    "    }\n" +
-                                    "}\n" +
-                                    "</MODIFY_FILE>\n\n" +
-                                    "Output ONLY the XML tag with complete Java code inside. No ``` fences, no explanation before the tag."));
+                                    "You MUST re-send your response as a raw XML tag with real code inside it. " +
+                                    "Use the project's detected language and test framework. " +
+                                    "Do not use markdown fences or plain text. Output ONLY the XML tag."));
                             beginAssistantMessage();
                             blinkTimer.start();
-                            streamAndHandle(model, endpoint, null, false, taskType);
+                            streamAndHandle(model, endpoint, null, false, taskType, attachments);
                             return;
                         } else {
                             recordMistakes(java.util.List.of("use-xml-tags"));
@@ -653,28 +1046,11 @@ public class ChatPanel {
                             // Always inject — covers plain-text responses AND post-retry failures
                             history.add(new ChatMessage("user",
                                     "CORRECTION REQUIRED: Your last response still did not write any files. " +
-                                    "REMINDER — this is a Java 21 Maven project. Write Java only, never Go or Python.\n" +
-                                    "You MUST output a raw XML tag with complete Java code inside it. " +
-                                    "Use this exact structure:\n\n" +
-                                    "<MODIFY_FILE path=\"src/test/java/plugin/LocalLLMClientTest.java\">\n" +
-                                    "package plugin;\n\n" +
-                                    "import org.junit.jupiter.api.Test;\n" +
-                                    "import plugin.llm.LocalLLMClient;\n" +
-                                    "import plugin.llm.model.ChatMessage;\n" +
-                                    "import java.util.List;\n" +
-                                    "import static org.junit.jupiter.api.Assertions.*;\n\n" +
-                                    "public class LocalLLMClientTest {\n\n" +
-                                    "    @Test\n" +
-                                    "    void yourTestMethod() {\n" +
-                                    "        // write your Java test here\n" +
-                                    "    }\n" +
-                                    "}\n" +
-                                    "</MODIFY_FILE>\n\n" +
-                                    "Replace the path and content with what you actually want to write. " +
+                                    "You MUST output a raw XML tag with complete code inside it. " +
+                                    "Use the detected language and the appropriate test framework or file conventions. " +
                                     "Output ONLY the XML tag — no ``` fences, no explanation before it."));
                             history.add(new ChatMessage("assistant",
-                                    "Understood. I will output only the <MODIFY_FILE> XML tag " +
-                                    "with complete Java code inside it."));
+                                    "Understood. I will output only the raw XML tag with complete code inside it."));
                         }
                     } else {
                         // Not in EDITING mode
@@ -691,21 +1067,20 @@ public class ChatPanel {
                                 injectBlockedWriteFeedback(opResult.warnings);
                             }
                             recordMistakes(opResult.mistakeKeys);
+                            refreshVersionControlStatus();
                             if (opResult.runTests) {
-                                if (opResult.testName != null) {
-                                    appendSystemMessage("Test execution requested for " + opResult.testName + ". Running tests…");
-                                    scheduleTestRun(model, endpoint, opResult.testName, taskType);
-                                } else {
-                                    appendSystemMessage("Test execution requested. Running tests…");
-                                    scheduleTestRun(model, endpoint, null, taskType);
-                                }
+                                appendSystemMessage("File operations applied. Running build check before tests…");
+                                refreshTelemetry("Testing", finalSnapshot);
+                                scheduleBuildCheck(model, endpoint, taskType, true, opResult.testName);
                                 return;
                             } else if (opResult.checkCompilation) {
                                 appendSystemMessage("Compilation check requested. Running build…");
-                                scheduleBuildCheck(model, endpoint, taskType);
+                                refreshTelemetry("Debugging", finalSnapshot);
+                                scheduleBuildCheck(model, endpoint, taskType, false, null);
                                 return;
                             } else if (opResult.customCommand != null) {
                                 appendSystemMessage("Custom command execution requested: " + opResult.customCommand + ". Running…");
+                                refreshTelemetry("Running command", finalSnapshot);
                                 scheduleCustomCommand(opResult.customCommand);
                                 return;
                             }
@@ -719,7 +1094,7 @@ public class ChatPanel {
                         if ("PLANNING".equals(mode)) {
                             if (hasFileOps) {
                                 appendSystemMessage("⚠ File operation tags detected but skipped because you are in PLANNING mode. Switch to EDITING mode to allow changes.");
-                            } else if (isFileOpIntent(userText)) {
+                            } else if (ChatPanelSupport.isFileOpIntent(userText)) {
                                 appendSystemMessage("💡 It looks like you want to make changes. Please switch to EDITING mode and ask again to have the files written to disk.");
                             }
                         }
@@ -741,6 +1116,7 @@ public class ChatPanel {
                     } else {
                         appendSystemMessage("Error: " + ex.getMessage());
                     }
+                    refreshTelemetry(isStop || stopRequested ? "Interrupted" : "Debugging", finalSnapshot);
                     setLoading(false);
                 });
             }
@@ -758,6 +1134,47 @@ public class ChatPanel {
         insert(text + "\n\n", userTextStyle);
     }
 
+    private void recordPromptHistory(String text) {
+        List<String> updated = ChatPanelSupport.recordPromptHistory(promptHistory, text, MAX_PROMPT_HISTORY);
+        promptHistory.clear();
+        promptHistory.addAll(updated);
+        resetPromptHistoryNavigation();
+    }
+
+    private void resetPromptHistoryNavigation() {
+        promptHistoryIndex = -1;
+        promptHistoryDraft = "";
+    }
+
+    private boolean shouldUsePromptHistoryNavigation(int keyCode) {
+        if (promptHistory.isEmpty()) return false;
+        if (promptHistoryIndex != -1) return true;
+        if (promptArea.getText().isBlank()) return keyCode == KeyEvent.VK_UP;
+        int caretPosition = promptArea.getCaretPosition();
+        if (keyCode == KeyEvent.VK_UP) {
+            return caretPosition == 0;
+        }
+        return caretPosition == promptArea.getText().length();
+    }
+
+    private boolean shouldResetPromptHistoryNavigation(KeyEvent e) {
+        int code = e.getKeyCode();
+        return code != KeyEvent.VK_SHIFT
+                && code != KeyEvent.VK_CONTROL
+                && code != KeyEvent.VK_ALT
+                && code != KeyEvent.VK_META
+                && code != KeyEvent.VK_UP
+                && code != KeyEvent.VK_DOWN
+                && code != KeyEvent.VK_ENTER
+                && !e.isActionKey();
+    }
+
+    private void appendAssistantMessage(String text) {
+        insert("Assistant\n", assistantRoleStyle);
+        insert(text + "\n\n", assistantTextStyle);
+        chatPane.setCaretPosition(chatDoc.getLength());
+    }
+
     private void beginAssistantMessage() {
         streaming = true;
         cursorOn  = false;
@@ -767,6 +1184,8 @@ public class ChatPanel {
 
     private void appendToken(String token) {
         assistantBuffer.append(token);
+        estimatedOutputTokens += ChatPanelSupport.estimateTokens(token);
+        refreshWorkspaceStatus();
         removeCursorIfPresent();
         insert(token, assistantTextStyle);
         insert("▌", cursorStyle);
@@ -824,16 +1243,19 @@ public class ChatPanel {
     // Utilities
     // -------------------------------------------------------------------------
 
-    private void scheduleBuildCheck(String model, String endpoint, AgentTask.TaskType taskType) {
+    private void scheduleBuildCheck(String model, String endpoint, AgentTask.TaskType taskType,
+                                    boolean runTestsAfterBuild, String testNameAfterBuild) {
+        refreshTelemetry("Debugging", null);
         // Runs after all VFS write actions have been dispatched to the EDT queue
         ApplicationManager.getApplication().invokeLater(() ->
             daemon(() -> {
                 BuildUtil.BuildResult result = BuildUtil.runCompile(project);
+                String projectType = ChatPanelSupport.projectTypeLabel(project);
                 // Scan for source files WHILE still in daemon thread — never on EDT
                 java.util.List<String> brokenPaths = result.success()
                         ? java.util.Collections.emptyList()
-                        : extractBrokenFilePaths(result.output());
-                String sourceContext = result.success() ? "" : scanProjectForErrorContext(result.output(), brokenPaths);
+                        : ChatPanelSupport.extractBrokenFilePaths(result.output());
+                String sourceContext = result.success() ? "" : ChatPanelSupport.scanProjectForErrorContext(project, result.output(), brokenPaths);
                 SwingUtilities.invokeLater(() -> {
                     if (result.success()) {
                         appendSystemMessage("✓ Build successful.");
@@ -843,6 +1265,9 @@ public class ChatPanel {
                             inTestFixLoop = false;
                             appendSystemMessage("Compile passed after test fix — re-running tests…");
                             scheduleTestRun(model, endpoint, testFixName, taskType);
+                        } else if (runTestsAfterBuild) {
+                            appendSystemMessage("Build passed — running tests…");
+                            scheduleTestRun(model, endpoint, testNameAfterBuild, taskType);
                         } else {
                             setLoading(false);
                         }
@@ -862,7 +1287,7 @@ public class ChatPanel {
                                 "</MODIFY_FILE>";
 
                         String fixInstruction = QwenPromptBuilder.buildCompileFixPrompt(
-                                errors, pathHint, sourceContext, buildFixAttempts, sameError);
+                                errors, pathHint, sourceContext, projectType, buildFixAttempts, sameError);
 
                         appendSystemMessage("⚠ Build errors — asking LLM to fix " +
                                 "(attempt " + buildFixAttempts + "/" +
@@ -884,14 +1309,16 @@ public class ChatPanel {
     }
 
     private void scheduleTestRun(String model, String endpoint, String testName, AgentTask.TaskType taskType) {
+        refreshTelemetry("Testing", null);
         ApplicationManager.getApplication().invokeLater(() ->
             daemon(() -> {
                 BuildUtil.BuildResult result = BuildUtil.runTest(project, testName);
+                String projectType = ChatPanelSupport.projectTypeLabel(project);
                 // Scan for source files WHILE still in daemon thread — never on EDT
                 java.util.List<String> brokenPaths = result.success()
                         ? java.util.Collections.emptyList()
-                        : extractBrokenFilePaths(result.output());
-                String sourceContext = result.success() ? "" : scanProjectForErrorContext(result.output(), brokenPaths);
+                        : ChatPanelSupport.extractBrokenFilePaths(result.output());
+                String sourceContext = result.success() ? "" : ChatPanelSupport.scanProjectForErrorContext(project, result.output(), brokenPaths);
                 SwingUtilities.invokeLater(() -> {
                     if (result.success()) {
                         appendSystemMessage("✓ Tests passed successfully.");
@@ -930,7 +1357,7 @@ public class ChatPanel {
                                     "</MODIFY_FILE>";
 
                             String fixInstruction = QwenPromptBuilder.buildTestFixPrompt(
-                                    errors, pathHint, sourceContext, buildFixAttempts, sameError);
+                                    errors, pathHint, sourceContext, projectType, buildFixAttempts, sameError);
 
                             // Set flag so that after the LLM writes a fix and it compiles,
                             // scheduleBuildCheck will re-run the tests automatically
@@ -1088,6 +1515,7 @@ public class ChatPanel {
     }
 
     private void scheduleGitAdd() {
+        refreshTelemetry("Version control", null);
         if (newlyCreatedFiles.isEmpty()) {
             appendSystemMessage("No new files to add to Git.");
             return;
@@ -1098,6 +1526,7 @@ public class ChatPanel {
                 SwingUtilities.invokeLater(() -> {
                     if (result.success()) {
                         appendSystemMessage("✓ Successfully added " + newlyCreatedFiles.size() + " new file(s) to Git.");
+                        refreshVersionControlStatus();
                     } else {
                         appendSystemMessage("❌ Git add failed:\n" + result.output());
                     }
@@ -1107,6 +1536,7 @@ public class ChatPanel {
     }
 
     private void scheduleCustomCommand(String command) {
+        refreshTelemetry("Running command", null);
         ApplicationManager.getApplication().invokeLater(() ->
             daemon(() -> {
                 BuildUtil.BuildResult result = BuildUtil.runCustomCommand(project, command);
@@ -1173,6 +1603,7 @@ public class ChatPanel {
         spinner.setIndeterminate(loading);
         spinner.setVisible(loading);
         promptArea.setEnabled(!loading);
+        refreshTelemetry(loading ? "Working" : "Ready", null);
         if (!loading) {
             promptArea.requestFocusInWindow();
             showDoneNotification();
@@ -1198,7 +1629,9 @@ public class ChatPanel {
                 toast.setLocation(x, y);
                 toast.setAlwaysOnTop(true);
                 toast.setVisible(true);
-                new javax.swing.Timer(2500, e -> toast.dispose()).start();
+                javax.swing.Timer timer = new javax.swing.Timer(2500, e -> toast.dispose());
+                timer.setRepeats(false);
+                timer.start();
             } catch (Throwable ignored) {
                 // Last resort: do nothing if even Swing is unavailable
             }
@@ -1208,6 +1641,14 @@ public class ChatPanel {
     private void clearConversation() {
         history.clear();
         newlyCreatedFiles.clear();
+        pendingAttachments.clear();
+        estimatedInputTokens = 0;
+        estimatedOutputTokens = 0;
+        currentContextUsagePercent = 0;
+        streaming = false;
+        cursorOn = false;
+        assistantBuffer.setLength(0);
+        blinkTimer.stop();
         chatDoc = new DefaultStyledDocument();
         initStyles();
         chatPane.setStyledDocument(chatDoc);
@@ -1215,6 +1656,10 @@ public class ChatPanel {
         buildFixAttempts = 0;
         titleLabel.setText("  New Chat");
         if (tabContent != null) tabContent.setDisplayName("New Chat");
+        refreshWorkspaceStatus();
+        refreshTelemetry("Ready", null);
+        refreshVersionControlStatus();
+        refreshAttachmentStrip();
         appendSystemMessage("Chat cleared. New conversation started.");
         promptArea.requestFocusInWindow();
         lastCompileFingerprint = "";
@@ -1225,6 +1670,346 @@ public class ChatPanel {
         daemon(() -> {
             if (contextCollector != null) contextCollector.reindex();
         });
+    }
+
+    @Override
+    public void dispose() {
+        stopRequested = true;
+        if (currentChatThread != null && currentChatThread.isAlive()) {
+            currentChatThread.interrupt();
+        }
+        blinkTimer.stop();
+        if (contextCollector != null) {
+            contextCollector = null;
+        }
+        skillMemory = null;
+        history.clear();
+        promptHistory.clear();
+        newlyCreatedFiles.clear();
+        pendingAttachments.clear();
+        project.putUserData(PANEL_KEY, null);
+    }
+
+    private void refreshWorkspaceStatus() {
+        if (workspaceStatusLabel == null) return;
+        workspaceStatusLabel.setText(ChatPanelSupport.formatWorkspaceStatus(
+                workspaceProjectTypeLabel, estimatedInputTokens, estimatedOutputTokens));
+        workspaceStatusLabel.setToolTipText(workspaceStatusLabel.getText());
+    }
+
+    private void refreshTelemetry(String activity, List<ChatMessage> snapshot) {
+        if (activityLabel != null) {
+            activityLabel.setText("Status: " + (activity == null || activity.isBlank() ? "Ready" : activity));
+            activityLabel.setToolTipText(activityLabel.getText());
+        }
+        if (fileHistoryLabel != null) {
+            fileHistoryLabel.setText("Files: " + newlyCreatedFiles.size() + " new");
+            fileHistoryLabel.setToolTipText(fileHistoryLabel.getText());
+        }
+        if (contextBar != null) {
+            List<ChatMessage> source = snapshot == null ? history : snapshot;
+            currentContextUsagePercent = ChatPanelSupport.contextUsagePercent(source, CONTEXT_BUDGET_TOKENS);
+            contextBar.setValue(currentContextUsagePercent);
+            contextBar.setString("Context " + currentContextUsagePercent + "%");
+            contextBar.setToolTipText("Estimated context usage: " + currentContextUsagePercent + "% of ~" + CONTEXT_BUDGET_TOKENS + " tokens.");
+        }
+    }
+
+    private void refreshVersionControlStatus() {
+        if (gitStatusLabel == null) return;
+        gitStatusLabel.setText("Git: checking…");
+        daemon(() -> {
+            GitUtil.GitResult result = GitUtil.status(project);
+            SwingUtilities.invokeLater(() -> {
+                if (gitStatusLabel == null) return;
+                if (result.success()) {
+                    String output = result.output();
+                    String summary;
+                    if (output == null || output.isBlank()) {
+                        summary = "Git: clean";
+                    } else {
+                        long changed = output.lines().filter(line -> !line.startsWith("##") && !line.isBlank()).count();
+                        summary = "Git: " + changed + " change(s)";
+                    }
+                    gitStatusLabel.setText(summary);
+                    gitStatusLabel.setToolTipText(result.output());
+                } else {
+                    gitStatusLabel.setText("Git: unavailable");
+                    gitStatusLabel.setToolTipText(result.output());
+                }
+            });
+        });
+    }
+
+    private String buildMemoryContext(String query, List<AttachmentData> attachments) {
+        SkillMemory memory = getSkillMemory();
+        StringBuilder sb = new StringBuilder();
+        if (memory != null) {
+            String memorySummary = memory.buildContextSummary(query);
+            if (!memorySummary.isBlank()) {
+                sb.append(memorySummary.strip());
+            }
+        }
+        String attachmentSummary = AttachmentUtil.buildTaskHint(attachments);
+        if (!attachmentSummary.isBlank()) {
+            if (sb.length() > 0) sb.append("\n\n");
+            sb.append("# Attachment Intent\n- ").append(attachmentSummary);
+        }
+        String containerSummary = ChatPanelSupport.buildContainerContext(project);
+        if (!containerSummary.isBlank()) {
+            if (sb.length() > 0) sb.append("\n\n");
+            sb.append(containerSummary.strip());
+        }
+        return sb.toString();
+    }
+
+    private String buildReviewContext(String query, List<AttachmentData> attachments) {
+        if (!ChatPanelSupport.isCommitReviewIntent(query)) {
+            return "";
+        }
+        StringBuilder sb = new StringBuilder();
+        GitTool gitTool = new GitTool(project);
+        GitTool.ToolResult branch = gitTool.currentBranch();
+        GitTool.ToolResult lastCommit = gitTool.lastCommit();
+        if (branch != null && branch.success() && branch.output() != null && !branch.output().isBlank()) {
+            sb.append("Current branch: ").append(branch.output().trim()).append("\n");
+        }
+        if (lastCommit != null && lastCommit.success() && lastCommit.output() != null && !lastCommit.output().isBlank()) {
+            sb.append("Latest commit details:\n").append(lastCommit.output().trim()).append("\n");
+        }
+        String attachmentBlock = AttachmentUtil.buildPromptBlock(attachments);
+        if (!attachmentBlock.isBlank()) {
+            sb.append("Attached ticket/spec context:\n").append(attachmentBlock.trim()).append("\n");
+        }
+        if (query != null && !query.isBlank()) {
+            sb.append("Review request:\n").append(query.trim()).append("\n");
+        }
+        sb.append("""
+                Review rules:
+                - Compare the last commit against the ticket/spec and the current codebase.
+                - Identify missing scope, regressions, and incomplete tests.
+                - Write actionable reviewer comments with file and line references where possible.
+                - If the commit is acceptable, say what was verified and why.
+                - If GitLab review publishing is requested, keep comments concise and specific.
+                """.trim());
+        return sb.toString();
+    }
+
+    private void maybePublishGitLabReview(String userText, String reviewText) {
+        if (!ChatPanelSupport.isCommitReviewIntent(userText)) {
+            return;
+        }
+        PluginSettings settings = PluginSettings.getInstance();
+        if (settings == null) {
+            return;
+        }
+        if (settings.getGitlabProject() == null || settings.getGitlabProject().isBlank()) {
+            return;
+        }
+        if (settings.getGitlabApiUrl() == null || settings.getGitlabApiUrl().isBlank()) {
+            return;
+        }
+        if (settings.getGitlabToken() == null || settings.getGitlabToken().isBlank()) {
+            return;
+        }
+
+        daemon(() -> {
+            GitTool gitTool = new GitTool(project);
+            GitTool.ToolResult shaResult = gitTool.currentCommitSha();
+            if (shaResult == null || !shaResult.success() || shaResult.output() == null || shaResult.output().isBlank()) {
+                SwingUtilities.invokeLater(() ->
+                        appendSystemMessage("GitLab review comment not posted: could not resolve the current commit SHA."));
+                return;
+            }
+
+            String note = reviewText == null ? "" : reviewText.trim();
+            if (note.length() > 5000) {
+                note = note.substring(0, 5000) + "\n[...truncated]";
+            }
+
+            IntegrationAccessUtil.IntegrationTestResult result =
+                    IntegrationAccessUtil.postGitLabCommitComment(settings, shaResult.output().trim(), note);
+            String status = result.success()
+                    ? "Posted review comment to GitLab commit " + shaResult.output().trim()
+                    : "GitLab review comment failed: " + result.message();
+            SwingUtilities.invokeLater(() -> appendSystemMessage(status));
+        });
+    }
+
+    private SkillMemory getSkillMemory() {
+        if (skillMemory == null) {
+            skillMemory = new SkillMemory(project);
+        }
+        return skillMemory;
+    }
+
+    private boolean shouldRememberSkill(String text, List<AttachmentData> attachments) {
+        if (text == null) return false;
+        String lower = text.toLowerCase();
+        return lower.contains("remember this")
+                || lower.contains("save this as skill")
+                || lower.contains("save it in your memory")
+                || lower.contains("learn this")
+                || lower.contains("store this")
+                || (lower.contains("remember") && AttachmentUtil.containsJiraTicketAttachment(attachments));
+    }
+
+    private void rememberSkillFromPrompt(String text, List<AttachmentData> attachments) {
+        SkillMemory memory = getSkillMemory();
+        String key = deriveSkillName(text, attachments);
+        String value = AttachmentUtil.buildPromptBlock(attachments);
+        if (value.isBlank()) {
+            value = text;
+        } else {
+            value = text + "\n\n" + value;
+        }
+        memory.remember(key, value);
+        appendSystemMessage("Saved to skill memory: " + key);
+    }
+
+    private void maybeUpdateSkillFromSession(String userText, String assistantText, List<AttachmentData> attachments) {
+        if (!ChatPanelSupport.isSkillUpdateIntent(userText)) {
+            return;
+        }
+        SkillMemory memory = getSkillMemory();
+        String key = deriveSkillName(userText, attachments);
+        String attachmentBlock = AttachmentUtil.buildPromptBlock(attachments);
+        String sessionText = assistantText == null ? "" : assistantText.trim();
+        if (!attachmentBlock.isBlank()) {
+            sessionText = attachmentBlock + "\n\n" + sessionText;
+        }
+        memory.rememberFromSession(key, userText, sessionText);
+        appendSystemMessage("Updated skill memory: " + key);
+    }
+
+    private String deriveSkillName(String text, List<AttachmentData> attachments) {
+        if (AttachmentUtil.containsPatchAttachment(attachments)) return "patch-workflow";
+        if (AttachmentUtil.containsJiraTicketAttachment(attachments)) return "jira-ticket-workflow";
+        if (AttachmentUtil.containsPdfAttachment(attachments)) return "pdf-spec-workflow";
+        if (AttachmentUtil.containsImageAttachment(attachments)) return "image-spec-workflow";
+        if (text != null) {
+            String lower = text.toLowerCase();
+            if (lower.contains("triple f") || lower.contains("triple-f")) return "triple-f-pattern";
+            if (lower.contains("test case")) return "test-case-pattern";
+            if (lower.contains("readme")) return "readme-workflow";
+            if (lower.contains("docker")) return "docker-workflow";
+            if (lower.contains("helm")) return "helm-workflow";
+        }
+        if (text == null || text.isBlank()) return "general-task";
+        String cleaned = text.replaceAll("[^a-zA-Z0-9 ]", " ").trim().toLowerCase();
+        if (cleaned.isBlank()) return "general-task";
+        String[] parts = cleaned.split("\\s+");
+        return parts[0] + (parts.length > 1 ? "-" + parts[1] : "");
+    }
+
+    private void refreshAttachmentStrip() {
+        if (attachmentsPanel == null) return;
+        attachmentsPanel.removeAll();
+        if (pendingAttachments.isEmpty()) {
+            if (attachmentHintLabel != null) {
+                attachmentsPanel.add(attachmentHintLabel);
+            }
+        } else {
+            for (int i = 0; i < pendingAttachments.size(); i++) {
+                AttachmentData attachment = pendingAttachments.get(i);
+                attachmentsPanel.add(buildAttachmentChip(attachment, i));
+            }
+        }
+        if (clearAttachmentsBtn != null) {
+            clearAttachmentsBtn.setVisible(!pendingAttachments.isEmpty());
+        }
+        attachmentsPanel.revalidate();
+        attachmentsPanel.repaint();
+    }
+
+    private JComponent buildAttachmentChip(AttachmentData attachment, int index) {
+        JPanel chip = new JPanel(new FlowLayout(FlowLayout.LEFT, 4, 0));
+        Color borderColor = UIManager.getColor("Separator.foreground");
+        if (borderColor == null) borderColor = UIManager.getColor("Label.foreground");
+        if (borderColor == null) borderColor = Color.GRAY;
+        Color backgroundColor = UIManager.getColor("Panel.background");
+        if (backgroundColor == null) backgroundColor = Color.WHITE;
+        chip.setBorder(BorderFactory.createCompoundBorder(
+                BorderFactory.createLineBorder(borderColor),
+                BorderFactory.createEmptyBorder(4, 8, 4, 6)
+        ));
+        chip.setOpaque(true);
+        chip.setBackground(backgroundColor);
+
+        String icon = attachment.image() ? "🖼" : "📎";
+        JLabel label = new JLabel(icon + " " + attachment.displayName());
+        label.setToolTipText(attachment.path() == null ? attachment.displayName() : attachment.path().toString());
+        chip.add(label);
+
+        JButton removeBtn = new JButton("×");
+        removeBtn.setMargin(new Insets(0, 4, 0, 4));
+        removeBtn.setFocusable(false);
+        removeBtn.addActionListener(e -> removeAttachment(index));
+        chip.add(removeBtn);
+        return chip;
+    }
+
+    private void removeAttachment(int index) {
+        if (index < 0 || index >= pendingAttachments.size()) return;
+        pendingAttachments.remove(index);
+        refreshAttachmentStrip();
+    }
+
+    private void clearAttachments() {
+        pendingAttachments.clear();
+        refreshAttachmentStrip();
+    }
+
+    private void addAttachmentsFromFiles(Collection<Path> paths) {
+        if (paths == null || paths.isEmpty()) return;
+        List<AttachmentData> loaded = AttachmentUtil.loadAttachments(paths);
+        if (loaded.isEmpty()) {
+            appendSystemMessage("No supported attachments were added.");
+            return;
+        }
+        pendingAttachments.addAll(loaded);
+        refreshAttachmentStrip();
+        refreshTelemetry("Ready", null);
+        appendSystemMessage("Attached " + loaded.size() + " file(s) for the next prompt.");
+    }
+
+    private TransferHandler buildAttachmentTransferHandler() {
+        return new TransferHandler() {
+            @Override
+            public boolean canImport(TransferSupport support) {
+                return support != null && support.isDataFlavorSupported(DataFlavor.javaFileListFlavor);
+            }
+
+            @Override
+            @SuppressWarnings("unchecked")
+            public boolean importData(TransferSupport support) {
+                if (!canImport(support)) return false;
+                try {
+                    Object data = support.getTransferable().getTransferData(DataFlavor.javaFileListFlavor);
+                    if (!(data instanceof List<?> rawList)) return false;
+                    List<Path> paths = new ArrayList<>();
+                    for (Object item : rawList) {
+                        if (item instanceof java.io.File file) {
+                            if (file.isDirectory()) {
+                                try (var stream = java.nio.file.Files.walk(file.toPath())) {
+                                    paths.addAll(stream
+                                            .filter(java.nio.file.Files::isRegularFile)
+                                            .limit(20)
+                                            .toList());
+                                }
+                            } else {
+                                paths.add(file.toPath());
+                            }
+                        }
+                    }
+                    addAttachmentsFromFiles(paths);
+                    return !paths.isEmpty();
+                } catch (Exception e) {
+                    appendSystemMessage("Could not attach dropped file(s): " + e.getMessage());
+                    return false;
+                }
+            }
+        };
     }
 
     private void recordMistakes(java.util.List<String> mistakeKeys) {
@@ -1244,17 +2029,13 @@ public class ChatPanel {
         String feedback = "SYSTEM FEEDBACK — The following file operations were rejected:\n" +
                 String.join("\n", blocked) + "\n\n" +
                 "REQUIRED ACTIONS:\n" +
-                "1. If the rejected file exists on disk with errors, delete it immediately using the XML tag: " +
-                "<DELETE_FILE path=\"src/test/java/plugin/ui/ChatPanelTest.java\" /> " +
-                "(adjust the path to match the actual file).\n" +
+                "1. If the rejected file exists on disk with errors, delete it immediately using the matching XML tag and path.\n" +
                 "2. Do NOT attempt to write or fix that file again.\n" +
-                "3. The ONLY unit-testable classes in this project are: " +
-                "plugin.llm.model.ChatMessage, plugin.settings.PluginSettings, plugin.llm.LocalLLMClient.\n" +
-                "4. Write tests only for those three classes using <CREATE_FILE path=\"src/test/java/plugin/FooTest.java\">.";
+                "3. Prefer extracted helpers or pure functions for UI-heavy code instead of testing the wrapper directly.\n" +
+                "4. Write tests in the project's detected language and follow its standard test layout.";
         history.add(new ChatMessage("user", feedback));
         history.add(new ChatMessage("assistant",
-                "Understood. I will delete the untestable test file and write correct tests " +
-                "only for ChatMessage, PluginSettings, or LocalLLMClient."));
+                "Understood. I will delete the rejected file and write tests for the appropriate helper or language-specific target."));
     }
 
     /**
@@ -1318,8 +2099,8 @@ public class ChatPanel {
             clearConversation();
             forcedTargetSymbol = className;
             if (modeCombo != null) modeCombo.setSelectedItem("EDITING");
-            promptArea.setText("Generate JUnit 5 + Mockito tests for " + className
-                    + ". Mirror the source package and place the test under the matching src/test/java path.");
+            promptArea.setText("Generate tests for " + className
+                    + " using the project's detected language and test framework. Place the file in the matching test location.");
             sendMessage();
         });
     }

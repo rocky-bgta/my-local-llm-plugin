@@ -12,6 +12,7 @@ public record AgentTask(
         ADD_FEATURE,
         FIX_BUG,
         REFACTOR,
+        REVIEW_COMMIT,
         DOCUMENT,
         ANALYZE,
         ENV_INFO,

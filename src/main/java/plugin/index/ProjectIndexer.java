@@ -3,6 +3,7 @@ package plugin.index;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.vfs.VirtualFile;
 import plugin.psi.SourceFileScanner;
+import plugin.util.LanguageSupportUtil;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -16,6 +17,9 @@ public class ProjectIndexer {
     );
     private static final Pattern PACKAGE_DECL = Pattern.compile(
             "^\\s*package\\s+([\\w.]+)\\s*;", Pattern.MULTILINE
+    );
+    private static final Pattern GO_PACKAGE_DECL = Pattern.compile(
+            "^\\s*package\\s+([\\w_]+)\\s*$", Pattern.MULTILINE
     );
 
     private final Project project;
@@ -43,24 +47,31 @@ public class ProjectIndexer {
     public SymbolIndex getIndex() { return index; }
 
     private void indexSourceFiles() {
-        for (VirtualFile vf : SourceFileScanner.scanAllJavaFiles(project)) {
+        for (VirtualFile vf : SourceFileScanner.scanAllSourceFiles(project)) {
             String content = readContent(vf);
             if (content.isEmpty()) continue;
-            String pkg = extractPackage(content);
+            String pkg = extractPackage(vf.getPath(), content);
             String basePath = project.getBasePath();
             String relative = basePath != null ? vf.getPath().replace(basePath, "").replace("\\", "/") : vf.getName();
             if (relative.startsWith("/")) relative = relative.substring(1);
 
-            Matcher m = CLASS_DECL.matcher(content);
             String primarySymbol = vf.getNameWithoutExtension();
-            String symbolType = "CLASS";
-            if (m.find()) {
-                symbolType = m.group(1).toUpperCase();
-                primarySymbol = m.group(2);
+            String symbolType = LanguageSupportUtil.isTestFile(vf.getPath()) ? "TEST" : "SOURCE";
+
+            if (LanguageSupportUtil.detectLanguage(vf.getPath()) == LanguageSupportUtil.Language.JAVA
+                    || LanguageSupportUtil.detectLanguage(vf.getPath()) == LanguageSupportUtil.Language.KOTLIN
+                    || LanguageSupportUtil.detectLanguage(vf.getPath()) == LanguageSupportUtil.Language.SCALA) {
+                Matcher m = CLASS_DECL.matcher(content);
+                if (m.find()) {
+                    symbolType = m.group(1).toUpperCase();
+                    primarySymbol = m.group(2);
+                }
             }
 
-            boolean isTest = vf.getPath().contains("test") || vf.getName().contains("Test");
-            if (isTest) symbolType = "TEST";
+            if (LanguageSupportUtil.detectLanguage(vf.getPath()) == LanguageSupportUtil.Language.GO
+                    && vf.getName().endsWith("_test.go")) {
+                symbolType = "TEST";
+            }
 
             index.add(new IndexEntry(
                     vf.getPath(), relative, primarySymbol,
@@ -84,9 +95,19 @@ public class ProjectIndexer {
         }
     }
 
-    private String extractPackage(String content) {
-        Matcher m = PACKAGE_DECL.matcher(content);
-        return m.find() ? m.group(1) : "";
+    private String extractPackage(String path, String content) {
+        LanguageSupportUtil.Language language = LanguageSupportUtil.detectLanguage(path);
+        if (language == LanguageSupportUtil.Language.GO) {
+            Matcher m = GO_PACKAGE_DECL.matcher(content);
+            return m.find() ? m.group(1) : "";
+        }
+        if (language == LanguageSupportUtil.Language.JAVA
+                || language == LanguageSupportUtil.Language.KOTLIN
+                || language == LanguageSupportUtil.Language.SCALA) {
+            Matcher m = PACKAGE_DECL.matcher(content);
+            return m.find() ? m.group(1) : "";
+        }
+        return "";
     }
 
     private String readContent(VirtualFile vf) {

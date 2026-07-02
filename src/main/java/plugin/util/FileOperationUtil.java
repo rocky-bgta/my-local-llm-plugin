@@ -7,6 +7,7 @@ import com.intellij.openapi.vfs.VirtualFile;
 import java.io.File;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
@@ -34,7 +35,7 @@ public class FileOperationUtil {
             "path/to/your/", "your/file/"
     );
 
-    // Classes that depend on IntelliJ Platform and cannot be unit-tested outside the IDE
+    // Direct tests for these IntelliJ Platform classes should be redirected to extracted helpers.
     private static final Set<String> UNTESTABLE_TEST_CLASSES = Set.of(
             "ChatPanelTest", "ChatToolWindowFactoryTest"
     );
@@ -129,7 +130,7 @@ public class FileOperationUtil {
                 continue;
             }
 
-            // Guard 3: auto-correct Java test file paths that land outside src/test/java/
+            // Guard 3: auto-correct test file paths that land outside the conventional test location
             String correctedPath = autoCorrectTestPath(path, content);
             if (!correctedPath.equals(path)) {
                 warnings.add("⚠ Auto-corrected path: \"" + path + "\" → \"" + correctedPath + "\"");
@@ -187,9 +188,6 @@ public class FileOperationUtil {
         return null;
     }
 
-    /**
-     * Returns a warning string if the file is a known IntelliJ-platform-dependent test class, null otherwise.
-     */
     private static String detectUntestableClass(String path) {
         String normalized = path.replace("\\", "/");
         String fileName = normalized.contains("/")
@@ -198,10 +196,11 @@ public class FileOperationUtil {
         String className = fileName.endsWith(".java") ? fileName.substring(0, fileName.length() - 5) : fileName;
         if (UNTESTABLE_TEST_CLASSES.contains(className)) {
             return "⛔ Blocked: " + className + " depends on IntelliJ Platform (Project / ApplicationManager) " +
-                   "and cannot be unit-tested outside the IDE. No file was written. " +
+                   "and should not be unit-tested directly. No file was written. " +
+                   "Write tests for extracted helpers instead, for example plugin.ui.ChatPanelSupport. " +
                    "If this file exists on disk with errors, delete it with " +
                    "<DELETE_FILE path=\"" + normalized + "\" /> " +
-                   "then write tests only for: ChatMessage, PluginSettings, LocalLLMClient.";
+                   "then write tests for the helper logic.";
         }
         return null;
     }
@@ -214,16 +213,19 @@ public class FileOperationUtil {
         String normalized = path.replace("\\", "/");
         if (!PROTECTED_TEST_FILES.contains(normalized)) return null;
 
-        // JUnit 4 pattern: @Test(expected = ...) — not valid in JUnit 5
-        if (content.contains("@Test(expected")) {
-            return "⛔ Blocked overwrite of \"" + normalized + "\": content uses JUnit 4 syntax " +
-                   "(@Test(expected=...)) which is not supported. Use JUnit 5: " +
-                   "assertThrows(Exception.class, () -> ...).";
-        }
-        // Missing JUnit 5 import — likely generated without reading the source file
-        if (!content.contains("org.junit.jupiter")) {
-            return "⛔ Blocked overwrite of \"" + normalized + "\": content is missing JUnit 5 imports " +
-                   "(org.junit.jupiter.api.Test). Read the existing file first and keep the correct imports.";
+        LanguageSupportUtil.Language language = LanguageSupportUtil.detectLanguage(normalized);
+        if (LanguageSupportUtil.isJvmLanguage(language)) {
+            // JUnit 4 pattern: @Test(expected = ...) — not valid in JUnit 5
+            if (content.contains("@Test(expected")) {
+                return "⛔ Blocked overwrite of \"" + normalized + "\": content uses JUnit 4 syntax " +
+                       "(@Test(expected=...)) which is not supported. Use JUnit 5: " +
+                       "assertThrows(Exception.class, () -> ...).";
+            }
+            // Missing JUnit 5 import — likely generated without reading the source file
+            if (!content.contains("org.junit.jupiter")) {
+                return "⛔ Blocked overwrite of \"" + normalized + "\": content is missing JUnit 5 imports " +
+                       "(org.junit.jupiter.api.Test). Read the existing file first and keep the correct imports.";
+            }
         }
         return null;
     }
@@ -233,21 +235,30 @@ public class FileOperationUtil {
      * src/test/java/, reconstructs the correct path from the package declaration in its content.
      */
     private static String autoCorrectTestPath(String path, String content) {
-        if (!path.endsWith(".java")) return path;
         String normalized = path.replace("\\", "/");
-        if (!normalized.endsWith("Test.java") && !normalized.endsWith("Tests.java")) return path;
-        if (normalized.startsWith("src/test/java/")) return path;
-
-        String fileName = normalized.contains("/")
-                ? normalized.substring(normalized.lastIndexOf('/') + 1)
-                : normalized;
-
-        Matcher pkgMatcher = PACKAGE_PATTERN.matcher(content);
-        if (pkgMatcher.find()) {
-            String pkgPath = pkgMatcher.group(1).replace('.', '/');
-            return "src/test/java/" + pkgPath + "/" + fileName;
+        String suggested = LanguageSupportUtil.suggestedTestPath(normalized);
+        if (suggested.equals(normalized)) {
+            if (normalized.startsWith("src/test/") || normalized.contains("/test/")) return path;
+            return path;
         }
-        return "src/test/java/" + fileName;
+        LanguageSupportUtil.Language language = LanguageSupportUtil.detectLanguage(normalized);
+        if (LanguageSupportUtil.isJvmLanguage(language)) {
+            String fileName = normalized.substring(normalized.lastIndexOf('/') + 1);
+            Matcher pkgMatcher = PACKAGE_PATTERN.matcher(content);
+            if (pkgMatcher.find()) {
+                String pkgPath = pkgMatcher.group(1).replace('.', '/');
+                if (normalized.startsWith("src/main/java/")) {
+                    return "src/test/java/" + pkgPath + "/" + fileName;
+                }
+                if (normalized.startsWith("src/main/kotlin/")) {
+                    return "src/test/kotlin/" + pkgPath + "/" + fileName;
+                }
+                if (normalized.startsWith("src/main/scala/")) {
+                    return "src/test/scala/" + pkgPath + "/" + fileName;
+                }
+            }
+        }
+        return suggested;
     }
 
     private static void createFolder(Project project, String relativePath) {
@@ -338,26 +349,20 @@ public class FileOperationUtil {
                     VirtualFile baseDir = project.getBaseDir();
                     if (baseDir == null) return;
 
-                    // Ensure we are working with forward slashes for cross-platform compatibility
                     String normalizedPath = relativePath.replace("\\", "/");
                     File file = new File(baseDir.getPath(), normalizedPath);
                     File parent = file.getParentFile();
                     if (parent != null && !parent.exists()) {
-                        parent.mkdirs();
+                        Files.createDirectories(parent.toPath());
                     }
 
+                    Files.writeString(file.toPath(), content, StandardCharsets.UTF_8,
+                            java.nio.file.StandardOpenOption.CREATE,
+                            java.nio.file.StandardOpenOption.TRUNCATE_EXISTING);
+
+                    LocalFileSystem.getInstance().refreshAndFindFileByIoFile(file);
                     VirtualFile virtualFile = LocalFileSystem.getInstance().refreshAndFindFileByIoFile(file);
-                    if (virtualFile == null) {
-                        // Refresh parent to ensure it's known to VFS
-                        VirtualFile parentVf = LocalFileSystem.getInstance().refreshAndFindFileByIoFile(parent);
-                        if (parentVf != null) {
-                            virtualFile = parentVf.createChildData(null, file.getName());
-                        }
-                    }
-
                     if (virtualFile != null) {
-                        virtualFile.setBinaryContent(content.getBytes(StandardCharsets.UTF_8));
-                        // Force refresh to show in IDE
                         virtualFile.refresh(false, false);
                     }
                 } catch (IOException e) {

@@ -2,6 +2,7 @@ package plugin.rag;
 
 import plugin.index.IndexEntry;
 import plugin.index.SymbolIndex;
+import plugin.util.LanguageSupportUtil;
 
 import java.util.List;
 import java.util.stream.Collectors;
@@ -26,10 +27,11 @@ public class EmbeddingSearch {
     }
 
     public List<RetrievalResult> searchSimilarTests(String targetClass, int topK) {
-        String query = "test " + targetClass + " junit assert mock";
+        String query = "test " + targetClass + " assert mock";
         return symbolIndex.search(query, topK * 2).stream()
                 .filter(e -> "TEST".equals(e.symbolType()) ||
-                        e.symbolName().endsWith("Test") || e.filePath().contains("test"))
+                        e.symbolName().endsWith("Test") || e.filePath().contains("test") ||
+                        LanguageSupportUtil.isTestFile(e.filePath()))
                 .map(e -> RetrievalResult.of(
                         e.filePath(), e.relativeFilePath(), e.symbolName(),
                         e.symbolType(), e.content(), computeScore(e, query), "EMBEDDING_TEST"

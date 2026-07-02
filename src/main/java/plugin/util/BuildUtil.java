@@ -2,6 +2,7 @@ package plugin.util;
 
 import com.intellij.openapi.project.Project;
 
+import java.io.File;
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.nio.file.Paths;
@@ -35,6 +36,16 @@ public class BuildUtil {
         }
         if (Paths.get(basePath, "package.json").toFile().exists()) {
             return runCustomCommand(project, "npm run build");
+        }
+        if (Paths.get(basePath, "Cargo.toml").toFile().exists()) {
+            return runCustomCommand(project, "cargo build");
+        }
+        if (Paths.get(basePath, "pyproject.toml").toFile().exists()
+                || Paths.get(basePath, "requirements.txt").toFile().exists()) {
+            return runCustomCommand(project, "python -m build");
+        }
+        if (hasAnyFileWithExtension(basePath, ".sln") || hasAnyCsproj(basePath)) {
+            return runCustomCommand(project, "dotnet build");
         }
         if (Paths.get(basePath, "Makefile").toFile().exists()) {
             return runCustomCommand(project, "make");
@@ -70,6 +81,16 @@ public class BuildUtil {
         if (Paths.get(basePath, "package.json").toFile().exists()) {
             return runCustomCommand(project, "npm test");
         }
+        if (Paths.get(basePath, "Cargo.toml").toFile().exists()) {
+            return runCustomCommand(project, "cargo test");
+        }
+        if (Paths.get(basePath, "pyproject.toml").toFile().exists()
+                || Paths.get(basePath, "requirements.txt").toFile().exists()) {
+            return runCustomCommand(project, "python -m pytest");
+        }
+        if (hasAnyFileWithExtension(basePath, ".sln") || hasAnyCsproj(basePath)) {
+            return runCustomCommand(project, "dotnet test");
+        }
 
         return new BuildResult(false, "No recognized test runner found. Please use <EXECUTE_COMMAND command=\"...\" /> to specify the test command.", List.of());
     }
@@ -78,7 +99,13 @@ public class BuildUtil {
         String basePath = project.getBasePath();
         if (basePath == null) return new BuildResult(false, "Could not determine project base path.", List.of());
         try {
-            boolean isWindows = System.getProperty("os.name").toLowerCase().contains("win");
+            boolean isWindows = CommandIntentUtil.isWindowsPlatform();
+            if (!CommandIntentUtil.isCommandCompatibleWithCurrentPlatform(command)) {
+                String platformMessage = isWindows
+                        ? "This is a Windows PowerShell environment. Use PowerShell-native commands instead of Unix-only tools like grep/find/sed/awk/xargs."
+                        : "This is a Unix-like environment. Use shell-native commands instead of Windows-only tools like cmd/powershell/pwsh/Get-ChildItem/Select-String.";
+                return new BuildResult(false, platformMessage, List.of());
+            }
             String normalizedCommand = normalizeCustomCommand(command, isWindows);
             List<String> fullCommand = new ArrayList<>();
             if (isWindows) {
@@ -152,7 +179,7 @@ public class BuildUtil {
         String basePath = project.getBasePath();
         if (basePath == null) return new BuildResult(false, "Could not determine project base path.", List.of());
         try {
-            boolean isWindows = System.getProperty("os.name").toLowerCase().contains("win");
+            boolean isWindows = CommandIntentUtil.isWindowsPlatform();
             List<String> command = new ArrayList<>();
             if (isWindows) {
                 command.add("cmd");
@@ -193,5 +220,16 @@ public class BuildUtil {
         } catch (Exception e) {
             return new BuildResult(false, goal + " failed to start: " + e.getMessage(), List.of());
         }
+    }
+
+    private static boolean hasAnyCsproj(String basePath) {
+        return Paths.get(basePath).toFile().listFiles() != null
+                && java.util.Arrays.stream(Paths.get(basePath).toFile().listFiles())
+                .anyMatch(f -> f.getName().endsWith(".csproj"));
+    }
+
+    private static boolean hasAnyFileWithExtension(String basePath, String extension) {
+        File[] files = Paths.get(basePath).toFile().listFiles();
+        return files != null && java.util.Arrays.stream(files).anyMatch(f -> f.getName().endsWith(extension));
     }
 }

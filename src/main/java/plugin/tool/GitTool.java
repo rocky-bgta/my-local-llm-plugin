@@ -38,12 +38,27 @@ public class GitTool {
         return run(List.of("git", "log", "--oneline", "-" + n), 15);
     }
 
+    public ToolResult lastCommit() {
+        return run(List.of("git", "show", "--stat", "--patch", "--format=fuller", "--no-ext-diff", "-1"), 30);
+    }
+
+    public ToolResult show(String ref) {
+        if (ref == null || ref.isBlank()) {
+            return lastCommit();
+        }
+        return run(List.of("git", "show", "--stat", "--patch", "--format=fuller", "--no-ext-diff", ref), 30);
+    }
+
     public ToolResult commit(String message) {
         return run(List.of("git", "commit", "-m", message), 30);
     }
 
     public ToolResult currentBranch() {
         return run(List.of("git", "rev-parse", "--abbrev-ref", "HEAD"), 10);
+    }
+
+    public ToolResult currentCommitSha() {
+        return run(List.of("git", "rev-parse", "HEAD"), 10);
     }
 
     private ToolResult run(List<String> cmd, int timeoutSeconds) {

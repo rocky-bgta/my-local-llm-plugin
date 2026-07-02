@@ -24,14 +24,14 @@ public class Planner {
         plan.addStep("PSI: locate " + target)
             .addStep("PSI: find related classes via dependency analysis")
             .addStep("Embedding: find similar test patterns")
-            .addStep("Read: pom.xml for test framework detection")
+            .addStep("Read project config for test framework detection")
             .addStep("Rerank: select top 8 context files")
-            .addStep("LLM: generate JUnit 5 tests with Mockito")
+            .addStep("LLM: generate tests in the project's native framework")
             .addStep("Editor: apply CREATE_FILE for test class")
             .addStep("Maven: run tests to verify")
-            .withTestStrategy("JUnit 5, Mockito, AAA pattern, edge cases + happy path");
+            .withTestStrategy("Project-native framework, edge cases + happy path");
         if (target != null) {
-            plan.addAffectedFile("src/test/java/plugin/" + target + "Test.java");
+            plan.addAffectedFile(target + "Test");
         }
     }
 

@@ -1,5 +1,7 @@
 package plugin.util;
 
+import plugin.memory.InternalWorkspaceStore;
+
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -13,23 +15,20 @@ import java.util.Map;
 /**
  * Records mistakes the local LLM makes and exposes them as a prompt section so future
  * conversations automatically inherit learned rules. Each unique mistake is written once
- * to .llm_corrections.md in the project root.
+ * to .local-llm/corrections/llm-corrections.md.
  */
 public class LLMCorrectionsUtil {
-
-    static final String CORRECTIONS_FILE = ".llm_corrections.md";
 
     public static final Map<String, String> RULES = new LinkedHashMap<>();
     static {
         RULES.put("no-chatpanel-test",
-                "NEVER write ChatPanelTest.java or ChatToolWindowFactoryTest.java. These require " +
-                "IntelliJ Platform (Project/ApplicationManager) and cannot be unit-tested outside the IDE. " +
-                "Testable classes: plugin.llm.model.ChatMessage, plugin.settings.PluginSettings, " +
-                "plugin.llm.LocalLLMClient.");
+                "NEVER write direct unit tests for ChatPanelTest.java or ChatToolWindowFactoryTest.java. " +
+                "Instead, write tests for extracted helper logic such as plugin.ui.ChatPanelSupport. " +
+                "Keep IntelliJ Platform UI wrappers thin and test the pure logic behind them.");
         RULES.put("no-placeholder-path",
                 "ALWAYS use real project paths in file operation tags. NEVER use placeholder paths " +
                 "such as \"path/to/file\", \"your/path\", or \"example/path\". " +
-                "Java test files go in src/test/java/plugin/. Source files go in src/main/java/plugin/.");
+                "Use the project's actual source/test layout for the detected language.");
         RULES.put("use-xml-tags",
                 "In EDITING mode, ALWAYS use <MODIFY_FILE> or <CREATE_FILE> XML tags to write files. " +
                 "Markdown ``` code blocks and plain text descriptions do NOT write to disk.");
@@ -37,6 +36,9 @@ public class LLMCorrectionsUtil {
                 "When asked to write tests, NEVER inspect the directory tree with tree/ls/dir or " +
                 "custom commands. Use the retrieved source context and write a concrete JUnit 5 test file directly. " +
                 "If no class is named, choose the most relevant source class from context and create its test file.");
+        RULES.put("windows-shell-notes",
+                "This project is running on Windows PowerShell. Do NOT use Unix-only commands like grep, find, sed, awk, xargs, head, tail, or cat. " +
+                "Use PowerShell equivalents such as Get-ChildItem, Select-String, Get-Content, and Select-Object.");
         RULES.put("junit5-only",
                 "ALWAYS use JUnit 5 syntax (import org.junit.jupiter.api.Test). NEVER use JUnit 4 " +
                 "annotations like @Test(expected=...) or @RunWith. " +
@@ -45,16 +47,18 @@ public class LLMCorrectionsUtil {
                 "File operation XML tags MUST be UPPERCASE: <MODIFY_FILE>, <CREATE_FILE>, <DELETE_FILE>. " +
                 "Never use lowercase (<modify_file>) or mixed-case (<Modify_File>).");
         RULES.put("correct-test-package",
-                "Java unit test files MUST be placed in src/test/java/plugin/ (package plugin). " +
-                "Do NOT place tests in sub-packages like plugin.llm, plugin.settings, or plugin.util.");
+                "Test files MUST follow the test layout conventions of the detected language and project. " +
+                "Keep the test path aligned with the source file/module/package structure when the language requires it.");
     }
 
     public static String loadCorrectionsForPrompt(String projectBasePath) {
         if (projectBasePath == null) return "";
-        Path file = Paths.get(projectBasePath, CORRECTIONS_FILE);
-        if (!Files.exists(file)) return "";
+        Path file = InternalWorkspaceStore.correctionsFile(projectBasePath);
+        Path legacyFile = InternalWorkspaceStore.legacyRoot(projectBasePath).resolve(".llm_corrections.md");
+        Path sourceFile = Files.exists(file) ? file : legacyFile;
+        if (!Files.exists(sourceFile)) return "";
         try {
-            return Files.readString(file, StandardCharsets.UTF_8).trim();
+            return Files.readString(sourceFile, StandardCharsets.UTF_8).trim();
         } catch (IOException e) {
             return "";
         }
@@ -62,10 +66,13 @@ public class LLMCorrectionsUtil {
 
     public static void recordMistake(String projectBasePath, String ruleKey) {
         if (projectBasePath == null || !RULES.containsKey(ruleKey)) return;
-        Path file = Paths.get(projectBasePath, CORRECTIONS_FILE);
+        Path file = InternalWorkspaceStore.correctionsFile(projectBasePath);
+        Path legacyFile = InternalWorkspaceStore.legacyRoot(projectBasePath).resolve(".llm_corrections.md");
         try {
-            String existing = Files.exists(file)
-                    ? Files.readString(file, StandardCharsets.UTF_8) : "";
+            Files.createDirectories(file.getParent());
+            Path sourceFile = Files.exists(file) ? file : legacyFile;
+            String existing = Files.exists(sourceFile)
+                    ? Files.readString(sourceFile, StandardCharsets.UTF_8) : "";
 
             if (existing.contains("[" + ruleKey + "]")) return;
 

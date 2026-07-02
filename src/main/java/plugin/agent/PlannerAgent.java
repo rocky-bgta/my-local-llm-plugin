@@ -30,17 +30,19 @@ public class PlannerAgent {
             "Generate", "Write", "Create", "Add", "Implement", "Fix", "Make", "Build",
             "Test", "Tests", "Please", "Update", "Refactor", "Explain", "Document",
             "Run", "Use", "The", "This", "That", "For", "And", "With", "Class",
-            "Method", "Code", "File", "JUnit", "Mockito", "Java", "New"
+            "Method", "Code", "File", "Java", "Kotlin", "Go", "Python", "TypeScript",
+            "JavaScript", "Rust", "Ruby", "PHP", "CSharp", "New"
     );
 
     // Task-type → expansion terms added to the BM25 query
     private static final Map<AgentTask.TaskType, String> EXPANSION = Map.of(
-            AgentTask.TaskType.GENERATE_TESTS, "test junit mockito assert verify beforeEach",
+            AgentTask.TaskType.GENERATE_TESTS, "test assert verify mock edge cases",
             AgentTask.TaskType.FIX_BUG,        "error exception stacktrace fix compile",
             AgentTask.TaskType.ADD_FEATURE,     "implement method interface service",
             AgentTask.TaskType.REFACTOR,        "rename extract inline restructure",
+            AgentTask.TaskType.REVIEW_COMMIT,   "code review commit diff jira ticket comments defects",
             AgentTask.TaskType.EXPLAIN_CODE,    "class method field dependency",
-            AgentTask.TaskType.DOCUMENT,        "javadoc param return throws",
+            AgentTask.TaskType.DOCUMENT,        "javadoc param return throws readme markdown documentation overview installation usage features requirements",
             AgentTask.TaskType.ENV_INFO,        "environment os java maven shell platform system"
     );
 
@@ -56,12 +58,12 @@ public class PlannerAgent {
         switch (type) {
             case GENERATE_TESTS -> plan
                     .addStep("PSI: locate " + targetSymbol + " and direct dependencies")
-                    .addStep("BM25: find existing test patterns and JUnit 5 examples")
-                    .addStep("Read pom.xml for test framework versions")
+                    .addStep("BM25: find existing test patterns and framework examples")
+                    .addStep("Read project config for the test framework")
                     .addStep("Rerank top-6 files for 7B context budget")
-                    .addStep("LLM: generate JUnit 5 + Mockito tests")
+                    .addStep("LLM: generate tests in the project's native framework")
                     .addStep("Apply CREATE_FILE, then run <RUN_TESTS test=\"" + targetSymbol + "Test\">")
-                    .withTestStrategy("JUnit 5 + Mockito · AAA pattern · edge cases + happy path");
+                    .withTestStrategy("Project-native framework · happy path + edge cases + failure cases");
             case FIX_BUG -> plan
                     .addStep("PSI: locate failing class")
                     .addStep("BM25: find related error-handling patterns")
@@ -76,16 +78,31 @@ public class PlannerAgent {
                     .addStep("PSI: find all usages of target")
                     .addStep("LLM: apply refactoring across affected files")
                     .addStep("Run <CHECK_COMPILATION />");
+            case REVIEW_COMMIT -> plan
+                    .addStep("Git: inspect the latest commit diff and branch")
+                    .addStep("Jira: compare commit changes to the ticket description")
+                    .addStep("LLM: draft reviewer comments with missing scope and defects")
+                    .addStep("Optional: publish review feedback to GitLab");
             case EXPLAIN_CODE -> plan
                     .addStep("PSI: retrieve " + (targetSymbol.isEmpty() ? "relevant code" : targetSymbol))
                     .addStep("BM25: collect dependency context")
                     .addStep("LLM: explain");
+            case DOCUMENT -> plan
+                    .addStep("PSI: inspect project structure and configs")
+                    .addStep("BM25: find existing README and documentation patterns")
+                    .addStep("LLM: draft README.md with overview, setup, run, test, features, and requirements")
+                    .addStep("Apply CREATE_FILE or MODIFY_FILE for README.md");
             default -> plan
                     .addStep("BM25: find relevant context")
                     .addStep("LLM: respond");
         }
 
-        if (!targetSymbol.isEmpty()) plan.addAffectedFile(targetSymbol + ".java");
+        if (!targetSymbol.isEmpty()) {
+            plan.addAffectedFile(targetSymbol);
+            if ("ChatPanel".equals(targetSymbol)) {
+                plan.addAffectedFile("ChatPanelSupport.java");
+            }
+        }
         if (!targetFile.isEmpty())   plan.addAffectedFile(targetFile);
 
         ctx.setPlan(plan);
@@ -104,6 +121,17 @@ public class PlannerAgent {
         String extra = EXPANSION.get(type);
         if (extra != null) expanded.append(' ').append(extra);
         if (!target.isEmpty()) expanded.append(' ').append(target);
+        if ("ChatPanel".equals(target)) {
+            expanded.append(" ChatPanelSupport extractBrokenFilePaths isFileOpIntent splitIntoChunks");
+        }
+        if (type == AgentTask.TaskType.REVIEW_COMMIT) {
+            expanded.append(" last commit git show diff review jira ticket comment");
+        }
+        String lower = query == null ? "" : query.toLowerCase();
+        if (lower.contains("docker") || lower.contains("dockerfile") || lower.contains("compose")
+                || lower.contains("helm") || lower.contains("chart.yaml") || lower.contains("chart.yml")) {
+            expanded.append(" Dockerfile docker compose helm chart values.yaml container logs build run");
+        }
         return expanded.toString();
     }
 
@@ -118,14 +146,17 @@ public class PlannerAgent {
             return AgentTask.TaskType.GENERATE_TESTS;
         if (m.contains("fix") || m.contains("bug") || m.contains("error") || m.contains("fail"))
             return AgentTask.TaskType.FIX_BUG;
+        if (m.contains("document") || m.contains("javadoc") || m.contains("readme") || m.contains("project documentation"))
+            return AgentTask.TaskType.DOCUMENT;
         if (m.contains("add") || m.contains("implement") || m.contains("create") || m.contains("feature"))
             return AgentTask.TaskType.ADD_FEATURE;
         if (m.contains("refactor") || m.contains("clean") || m.contains("rename"))
             return AgentTask.TaskType.REFACTOR;
+        if ((m.contains("review") || m.contains("code review") || m.contains("commit review"))
+                && (m.contains("commit") || m.contains("change") || m.contains("diff") || m.contains("jira")))
+            return AgentTask.TaskType.REVIEW_COMMIT;
         if (m.contains("explain") || m.contains("what") || m.contains("how") || m.contains("why"))
             return AgentTask.TaskType.EXPLAIN_CODE;
-        if (m.contains("document") || m.contains("javadoc"))
-            return AgentTask.TaskType.DOCUMENT;
         return AgentTask.TaskType.GENERAL;
     }
 

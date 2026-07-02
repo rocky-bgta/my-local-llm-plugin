@@ -25,6 +25,15 @@ public class GitUtil {
         return runGitCommand(project, command);
     }
 
+    public static GitResult status(Project project) {
+        List<String> command = new ArrayList<>();
+        command.add("git");
+        command.add("status");
+        command.add("--short");
+        command.add("--branch");
+        return runGitCommand(project, command);
+    }
+
     private static GitResult runGitCommand(Project project, List<String> command) {
         String basePath = project.getBasePath();
         if (basePath == null) return new GitResult(false, "Could not determine project base path.");
