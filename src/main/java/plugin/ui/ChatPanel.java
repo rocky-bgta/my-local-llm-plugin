@@ -13,7 +13,7 @@ import plugin.integrations.IntegrationAccessUtil;
 import plugin.settings.PluginSettings;
 import plugin.agent.AgentTask;
 import plugin.agent.PlannerAgent;
-import plugin.llm.QwenPromptBuilder;
+import plugin.llm.PromptBuilder;
 import plugin.rag.ContextCollector;
 import plugin.rag.RetrievalResult;
 import plugin.memory.SkillMemory;
@@ -768,7 +768,7 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
             // Hybrid RAG: retrieve only the most relevant files for this query
             String context = buildRagContext(text);
             String corrections = plugin.util.LLMCorrectionsUtil.loadCorrectionsForPrompt(project.getBasePath());
-            // QwenPromptBuilder: compact system prompt tuned for Qwen2.5-Coder-7B/VL-7B
+            // PromptBuilder: compact system prompt tuned for the configured model
             String envInfo = plugin.util.EnvironmentInfoCollector.collectForPrompt(project);
             String memoryInfo = buildMemoryContext(text, attachments);
             if (readmeIntent) {
@@ -801,7 +801,7 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
                 }
                 memoryInfo += "# Integrations\n" + integrationInfo;
             }
-            String systemInstructions = QwenPromptBuilder.buildSystemPrompt(mode, corrections, envInfo, memoryInfo);
+            String systemInstructions = PromptBuilder.buildSystemPrompt(mode, corrections, envInfo, memoryInfo);
 
             history.add(new ChatMessage("system", systemInstructions));
 
@@ -1286,7 +1286,7 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
                                 "// complete corrected file content\n" +
                                 "</MODIFY_FILE>";
 
-                        String fixInstruction = QwenPromptBuilder.buildCompileFixPrompt(
+                        String fixInstruction = PromptBuilder.buildCompileFixPrompt(
                                 errors, pathHint, sourceContext, projectType, buildFixAttempts, sameError);
 
                         appendSystemMessage("⚠ Build errors — asking LLM to fix " +
@@ -1356,7 +1356,7 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
                                     "// complete corrected file content\n" +
                                     "</MODIFY_FILE>";
 
-                            String fixInstruction = QwenPromptBuilder.buildTestFixPrompt(
+                            String fixInstruction = PromptBuilder.buildTestFixPrompt(
                                     errors, pathHint, sourceContext, projectType, buildFixAttempts, sameError);
 
                             // Set flag so that after the LLM writes a fix and it compiles,

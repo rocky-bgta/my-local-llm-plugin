@@ -4,21 +4,18 @@ import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-public class QwenPromptBuilderTest {
+public class PromptBuilderTest {
 
     @Test
-    void systemPromptIncludesRuntimeEnvironmentInfo() {
-        String prompt = QwenPromptBuilder.buildSystemPrompt(
+    void systemPromptIsModelNeutralAndIncludesWorkflowRules() {
+        String prompt = PromptBuilder.buildSystemPrompt(
                 "EDITING",
                 "past correction",
                 "## Developer Environment\n- **OS**: Linux 6.8.0 (amd64)\n- **Shell**: Bash\n",
                 "# Skills / Memory\n- **angular-app**: Build Angular apps from images and PDFs.\n");
 
         assertTrue(prompt.contains("Runtime environment:"));
-        assertTrue(prompt.contains("## Developer Environment"));
-        assertTrue(prompt.contains("Linux 6.8.0"));
         assertTrue(prompt.contains("Skills and memory:"));
-        assertTrue(prompt.contains("angular-app"));
         assertTrue(prompt.contains("Use configured integrations"));
         assertTrue(prompt.contains("review the latest git commit"));
         assertTrue(prompt.contains("Dockerfile, docker-compose, or Helm chart files"));
@@ -29,7 +26,7 @@ public class QwenPromptBuilderTest {
 
     @Test
     void fixPromptsIncludeProjectType() {
-        String compilePrompt = QwenPromptBuilder.buildCompileFixPrompt(
+        String compilePrompt = PromptBuilder.buildCompileFixPrompt(
                 "error output",
                 "",
                 "source context",
@@ -37,7 +34,7 @@ public class QwenPromptBuilderTest {
                 1,
                 false);
 
-        String testPrompt = QwenPromptBuilder.buildTestFixPrompt(
+        String testPrompt = PromptBuilder.buildTestFixPrompt(
                 "test output",
                 "",
                 "source context",

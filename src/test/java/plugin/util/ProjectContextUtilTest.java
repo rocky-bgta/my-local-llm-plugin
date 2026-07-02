@@ -18,9 +18,14 @@ public class ProjectContextUtilTest {
                 new ProjectContextUtil.TreeNode("build", true, List.of(
                         new ProjectContextUtil.TreeNode("generated.txt", false, List.of())
                 )),
+                new ProjectContextUtil.TreeNode("logs", true, List.of(
+                        new ProjectContextUtil.TreeNode("debug.log", false, List.of())
+                )),
                 new ProjectContextUtil.TreeNode("generated-sources", true, List.of(
                         new ProjectContextUtil.TreeNode("Generated.java", false, List.of())
                 )),
+                new ProjectContextUtil.TreeNode(".env", false, List.of()),
+                new ProjectContextUtil.TreeNode("secret.key", false, List.of()),
                 new ProjectContextUtil.TreeNode("src", true, List.of(
                         new ProjectContextUtil.TreeNode("main", true, List.of(
                                 new ProjectContextUtil.TreeNode("java", true, List.of(
@@ -39,8 +44,12 @@ public class ProjectContextUtilTest {
         assertTrue(rendered.contains("README.md"));
         assertFalse(rendered.contains(".idea"));
         assertFalse(rendered.contains("build/"));
+        assertFalse(rendered.contains("logs/"));
         assertFalse(rendered.contains("generated-sources"));
         assertFalse(rendered.contains("workspace.xml"));
+        assertFalse(rendered.contains(".env"));
+        assertFalse(rendered.contains("secret.key"));
+        assertFalse(rendered.contains("debug.log"));
     }
 
     @Test
@@ -49,6 +58,9 @@ public class ProjectContextUtilTest {
         assertTrue(ProjectContextUtil.shouldExclude("target"));
         assertTrue(ProjectContextUtil.shouldExclude("out"));
         assertTrue(ProjectContextUtil.shouldExclude(".idea"));
+        assertTrue(ProjectContextUtil.shouldExclude(".env"));
+        assertTrue(ProjectContextUtil.shouldExclude("secrets.pem"));
+        assertTrue(ProjectContextUtil.shouldExclude("debug.log"));
     }
 
     private static String renderTree(ProjectContextUtil.TreeNode node) {

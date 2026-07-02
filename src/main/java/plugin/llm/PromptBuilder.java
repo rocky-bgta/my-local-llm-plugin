@@ -1,22 +1,14 @@
 package plugin.llm;
 
 /**
- * Builds system prompts and fix prompts tuned for Qwen2.5-Coder-7B / Qwen2.5-VL-7B.
+ * Builds model-agnostic system prompts and fix prompts for local or remote LLMs.
  *
- * Design goals for the 7B model:
- *  - System prompt ≤ 900 chars (7B degrades on very long instructions)
- *  - Explicit XML-tag examples with real paths (Qwen follows concrete examples)
- *  - Direct "senior engineer" framing (improves code quality at small scale)
- *  - Fix prompts are short and targeted — the model reads errors well but loses
- *    track of long context, so we include only the broken file and the exact error.
+ * The caller supplies mode, environment, and memory context; this class keeps
+ * the prompt content generic so it can be reused across different models.
  */
-public final class QwenPromptBuilder {
+public final class PromptBuilder {
 
-    private QwenPromptBuilder() {}
-
-    // -------------------------------------------------------------------------
-    // System prompt
-    // -------------------------------------------------------------------------
+    private PromptBuilder() {}
 
     public static String buildSystemPrompt(String mode, String corrections, String environmentInfo, String memoryInfo) {
         StringBuilder sb = new StringBuilder(900);
@@ -79,10 +71,6 @@ public final class QwenPromptBuilder {
         return sb.toString();
     }
 
-    // -------------------------------------------------------------------------
-    // Compile-error fix prompt
-    // -------------------------------------------------------------------------
-
     public static String buildCompileFixPrompt(String errorOutput,
                                                 String pathHint,
                                                 String sourceContext,
@@ -104,10 +92,6 @@ public final class QwenPromptBuilder {
         return sb.toString();
     }
 
-    // -------------------------------------------------------------------------
-    // Test-failure fix prompt
-    // -------------------------------------------------------------------------
-
     public static String buildTestFixPrompt(String errorOutput,
                                              String pathHint,
                                              String sourceContext,
@@ -128,10 +112,6 @@ public final class QwenPromptBuilder {
         }
         return sb.toString();
     }
-
-    // -------------------------------------------------------------------------
-    // Helpers
-    // -------------------------------------------------------------------------
 
     private static String cap(String text, int max) {
         if (text == null || text.isBlank()) return "";

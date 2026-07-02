@@ -31,7 +31,7 @@ public class ProjectContextUtil {
         if (baseDir == null) return "Project base directory not found.";
 
         sb.append("Current Project Structure:\n");
-        sb.append("Note: IDE/build/generated artifacts are excluded.\n\n");
+        sb.append("Note: IDE/build/generated artifacts and common secret/log files are excluded.\n\n");
         sb.append(baseDir.getName()).append("/\n");
         appendTree(new VirtualFileNode(baseDir), "", sb, 16000);
 
@@ -122,10 +122,16 @@ public class ProjectContextUtil {
                 || lower.equals("bin") || lower.equals("obj") || lower.equals("node_modules")
                 || lower.equals("generated") || lower.equals("generated-sources")
                 || lower.equals("generated-test-sources") || lower.equals("coverage")
-                || lower.equals("debug") || lower.equals("release") || lower.equals("tmp")
+                || lower.equals("debug") || lower.equals("release") || lower.equals("logs")
+                || lower.equals("tmp")
                 || lower.equals("temp")) return true;
         if (lower.endsWith(".iml") || lower.endsWith(".ipr") || lower.endsWith(".iws")) return true;
         if (lower.endsWith(".class") || lower.endsWith(".jar") || lower.endsWith(".war") || lower.endsWith(".ear")) return true;
+        if (lower.endsWith(".log") || lower.endsWith(".tmp") || lower.endsWith(".cache") || lower.endsWith(".swp")) return true;
+        if (lower.equals(".env") || lower.startsWith(".env.") || lower.endsWith(".env")
+                || lower.endsWith(".pem") || lower.endsWith(".key") || lower.endsWith(".p12")
+                || lower.endsWith(".pfx") || lower.endsWith(".jks") || lower.endsWith(".keystore")
+                || lower.endsWith(".crt") || lower.endsWith(".cer") || lower.endsWith(".der")) return true;
         if (lower.equals(".ds_store")) return true;
         return false;
     }
