@@ -63,6 +63,7 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
     private JProgressBar contextBar;
     private JPanel phaseStripPanel;
     private String  workspaceProjectTypeLabel = "Unknown project";
+    private String  lastAnnouncedTelemetryActivity = "";
     private Content tabContent;
     private boolean titleGenerated = false;
     private int currentContextUsagePercent = 0;
@@ -87,6 +88,7 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
     private JButton      clearAttachmentsBtn;
     private JProgressBar spinner;
     private JPanel       attachmentsPanel;
+    private JPanel       attachmentCardsPanel;
     private JLabel       attachmentHintLabel;
 
     private int estimatedInputTokens = 0;
@@ -234,12 +236,14 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
         clearContextBtn.setToolTipText("Clear chat display and reset conversation context (Ctrl+Shift+N)");
         clearContextBtn.addActionListener(e -> clearConversation());
 
-        JButton gearBtn = new JButton(AllIcons.General.Settings);
-        gearBtn.setBorderPainted(false);
-        gearBtn.setContentAreaFilled(false);
-        gearBtn.setFocusPainted(false);
+        JButton gearBtn = new JButton("Settings", AllIcons.General.Settings);
+        gearBtn.setToolTipText("Open settings for local LLM URL, model, MCP, GitLab, and Jira");
         gearBtn.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
-        gearBtn.setToolTipText("Settings");
+        gearBtn.setFocusable(false);
+        gearBtn.setMargin(new Insets(3, 10, 3, 10));
+        gearBtn.setHorizontalTextPosition(SwingConstants.RIGHT);
+        gearBtn.setVerticalTextPosition(SwingConstants.CENTER);
+        gearBtn.setIconTextGap(6);
         gearBtn.addActionListener(e -> showSettingsDialog());
 
         JPanel headerRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 0));
@@ -262,8 +266,9 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
         bar.add(headerRow);
         bar.add(Box.createVerticalStrut(4));
         bar.add(statusRow);
-        bar.add(Box.createVerticalStrut(4));
-        bar.add(phaseStripPanel);
+        if (phaseStripPanel != null) {
+            phaseStripPanel.setVisible(false);
+        }
 
         return bar;
     }
@@ -634,7 +639,7 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
                 BorderFactory.createEmptyBorder(8, 12, 12, 12)
         ));
 
-        attachmentsPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 6));
+        attachmentsPanel = new JPanel(new BorderLayout(0, 8));
         attachmentsPanel.setOpaque(false);
         Color attachmentBorderColor = UIManager.getColor("Separator.foreground");
         if (attachmentBorderColor == null) attachmentBorderColor = Color.GRAY;
@@ -642,7 +647,44 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
                 BorderFactory.createLineBorder(attachmentBorderColor),
                 BorderFactory.createEmptyBorder(8, 8, 8, 8)
         ));
-        attachmentHintLabel = null;
+        JPanel attachmentHeader = new JPanel(new BorderLayout(8, 0));
+        attachmentHeader.setOpaque(false);
+        JLabel attachmentTitle = new JLabel("Attachments");
+        attachmentTitle.setFont(attachmentTitle.getFont().deriveFont(Font.BOLD, 12f));
+        attachmentHintLabel = new JLabel();
+        attachmentHintLabel.setFont(attachmentHintLabel.getFont().deriveFont(Font.PLAIN, 11f));
+        attachmentHintLabel.setForeground(UIManager.getColor("Label.disabledForeground"));
+        if (attachmentHintLabel.getForeground() == null) {
+            attachmentHintLabel.setForeground(Color.GRAY);
+        }
+        JPanel attachmentTitlePanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 0));
+        attachmentTitlePanel.setOpaque(false);
+        attachmentTitlePanel.add(attachmentTitle);
+        attachmentTitlePanel.add(Box.createHorizontalStrut(8));
+        attachmentTitlePanel.add(attachmentHintLabel);
+
+        clearAttachmentsBtn = new JButton("Clear Attachments");
+        clearAttachmentsBtn.setToolTipText("Remove all dropped attachments before sending");
+        clearAttachmentsBtn.addActionListener(e -> clearAttachments());
+        clearAttachmentsBtn.setVisible(false);
+        clearAttachmentsBtn.setFocusable(false);
+        attachmentHeader.add(attachmentTitlePanel, BorderLayout.WEST);
+        attachmentHeader.add(clearAttachmentsBtn, BorderLayout.EAST);
+
+        attachmentCardsPanel = new JPanel();
+        attachmentCardsPanel.setOpaque(false);
+        attachmentCardsPanel.setLayout(new BoxLayout(attachmentCardsPanel, BoxLayout.Y_AXIS));
+
+        JScrollPane attachmentScroll = new JScrollPane(attachmentCardsPanel);
+        attachmentScroll.setBorder(BorderFactory.createEmptyBorder());
+        attachmentScroll.setHorizontalScrollBarPolicy(ScrollPaneConstants.HORIZONTAL_SCROLLBAR_NEVER);
+        attachmentScroll.setVerticalScrollBarPolicy(ScrollPaneConstants.VERTICAL_SCROLLBAR_AS_NEEDED);
+        attachmentScroll.getViewport().setOpaque(false);
+        attachmentScroll.setOpaque(false);
+        attachmentScroll.setPreferredSize(new Dimension(0, 88));
+
+        attachmentsPanel.add(attachmentHeader, BorderLayout.NORTH);
+        attachmentsPanel.add(attachmentScroll, BorderLayout.CENTER);
         attachmentsPanel.setTransferHandler(buildAttachmentTransferHandler());
         refreshAttachmentStrip();
 
@@ -715,11 +757,6 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
             setLoading(false);
         });
 
-        clearAttachmentsBtn = new JButton("Clear Attachments");
-        clearAttachmentsBtn.setToolTipText("Remove all dropped attachments before sending");
-        clearAttachmentsBtn.addActionListener(e -> clearAttachments());
-        clearAttachmentsBtn.setVisible(false);
-
         spinner = new JProgressBar();
         spinner.setIndeterminate(false);
         spinner.setPreferredSize(new Dimension(80, 14));
@@ -727,7 +764,6 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
 
         JPanel ctrlRow  = new JPanel(new BorderLayout(4, 0));
         JPanel leftCtrl = new JPanel(new FlowLayout(FlowLayout.LEFT, 4, 0));
-        leftCtrl.add(clearAttachmentsBtn);
         leftCtrl.add(spinner);
         ctrlRow.add(leftCtrl, BorderLayout.WEST);
         JPanel rightCtrl = new JPanel(new FlowLayout(FlowLayout.RIGHT, 4, 0));
@@ -755,8 +791,22 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
             text = AttachmentUtil.suggestedUserPrompt(attachments);
         }
 
+        if (ChatPanelSupport.isRunTestsIntent(text)) {
+            recordPromptHistory(text);
+            newlyCreatedFiles.clear();
+            promptArea.setText("");
+            pendingAttachments.clear();
+            refreshAttachmentStrip();
+            resetPromptHistoryNavigation();
+            appendSystemMessage("Running tests now…");
+            refreshTelemetry("Testing", null);
+            scheduleTestRun(null, null, null, AgentTask.TaskType.GENERAL);
+            return;
+        }
+
         if (ChatPanelSupport.isStructureOnlyResponse(text)) {
-            String structure = ChatPanelSupport.formatProjectStructureResponse(project);
+            String structure = ChatPanelSupport.stripProjectStructureWrappers(
+                    ChatPanelSupport.formatProjectStructureResponse(project));
             if (structure.isBlank()) {
                 appendSystemMessage("Project structure is unavailable for this workspace.");
                 return;
@@ -1003,7 +1053,8 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
                                 && (ChatPanelSupport.isNonActionableModelResponse(fullResponse)
                                     || (hasCustomCommand && ChatPanelSupport.isStructureListingCommand(fullResponse)))) {
                             appendSystemMessage("Project structure requests are rendered directly. Ignoring shell listing output.");
-                            String structure = ChatPanelSupport.formatProjectStructureResponse(project);
+                            String structure = ChatPanelSupport.stripProjectStructureWrappers(
+                                    ChatPanelSupport.formatProjectStructureResponse(project));
                             if (!structure.isBlank()) {
                                 history.add(new ChatMessage("assistant", structure));
                             }
@@ -1144,7 +1195,8 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
                                     || (fullResponse.contains("<EXECUTE_COMMAND")
                                         && ChatPanelSupport.isStructureListingCommand(fullResponse)))) {
                             appendSystemMessage("Project structure requests are rendered directly. Ignoring shell listing output.");
-                            String structure = ChatPanelSupport.formatProjectStructureResponse(project);
+                            String structure = ChatPanelSupport.stripProjectStructureWrappers(
+                                    ChatPanelSupport.formatProjectStructureResponse(project));
                             if (!structure.isBlank()) {
                                 history.add(new ChatMessage("assistant", structure));
                             }
@@ -1405,6 +1457,7 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
         refreshTelemetry("Testing", null);
         ApplicationManager.getApplication().invokeLater(() ->
             daemon(() -> {
+                SwingUtilities.invokeLater(() -> appendSystemMessage("Test runner started…"));
                 BuildUtil.BuildResult result = BuildUtil.runTest(project, testName);
                 String projectType = ChatPanelSupport.projectTypeLabel(project);
                 // Scan for source files WHILE still in daemon thread — never on EDT
@@ -1432,7 +1485,7 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
                         }
                         String rawOutput = result.output();
                         if (!rawOutput.isBlank()) output.append("\n").append(rawOutput);
-                        appendSystemMessage(output.toString());
+                        appendSystemMessage(ChatPanelSupport.stripProjectStructureWrappers(output.toString()));
 
                         if (buildFixAttempts < AutoFixLoop.MAX_TEST_ATTEMPTS) {
                             buildFixAttempts++;
@@ -1797,6 +1850,13 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
             if ("PLANNING".equals(mode) && "Thinking".equals(displayActivity)) {
                 displayActivity = "Planning";
             }
+            if (!displayActivity.equals(lastAnnouncedTelemetryActivity)) {
+                String announcement = ChatPanelSupport.telemetryAnnouncement(displayActivity);
+                if (!announcement.isBlank() && !"Ready.".equals(announcement)) {
+                    appendSystemMessage(announcement);
+                }
+                lastAnnouncedTelemetryActivity = displayActivity;
+            }
             statusBaseActivity = displayActivity;
             updatePhaseStrip(displayActivity);
             boolean animate = !"Ready".equals(displayActivity)
@@ -2118,23 +2178,45 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
     }
 
     private void refreshAttachmentStrip() {
-        if (attachmentsPanel == null) return;
-        attachmentsPanel.removeAll();
-        if (!pendingAttachments.isEmpty()) {
+        if (attachmentCardsPanel == null) return;
+        attachmentCardsPanel.removeAll();
+        if (pendingAttachments.isEmpty()) {
+            if (attachmentHintLabel != null) {
+                attachmentHintLabel.setText("No files attached");
+            }
+            JLabel empty = new JLabel("No files attached.");
+            empty.setFont(empty.getFont().deriveFont(Font.PLAIN, 11f));
+            empty.setForeground(UIManager.getColor("Label.disabledForeground"));
+            if (empty.getForeground() == null) {
+                empty.setForeground(Color.GRAY);
+            }
+            empty.setBorder(BorderFactory.createEmptyBorder(2, 2, 2, 2));
+            attachmentCardsPanel.add(empty);
+        } else {
+            if (attachmentHintLabel != null) {
+                attachmentHintLabel.setText(pendingAttachments.size() + " file(s) attached");
+            }
             for (int i = 0; i < pendingAttachments.size(); i++) {
                 AttachmentData attachment = pendingAttachments.get(i);
-                attachmentsPanel.add(buildAttachmentChip(attachment, i));
+                attachmentCardsPanel.add(buildAttachmentChip(attachment, i));
+                if (i < pendingAttachments.size() - 1) {
+                    attachmentCardsPanel.add(Box.createVerticalStrut(6));
+                }
             }
         }
         if (clearAttachmentsBtn != null) {
             clearAttachmentsBtn.setVisible(!pendingAttachments.isEmpty());
         }
-        attachmentsPanel.revalidate();
-        attachmentsPanel.repaint();
+        attachmentCardsPanel.revalidate();
+        attachmentCardsPanel.repaint();
+        if (attachmentsPanel != null) {
+            attachmentsPanel.revalidate();
+            attachmentsPanel.repaint();
+        }
     }
 
     private JComponent buildAttachmentChip(AttachmentData attachment, int index) {
-        JPanel chip = new JPanel(new FlowLayout(FlowLayout.LEFT, 4, 0));
+        JPanel chip = new JPanel(new BorderLayout(8, 0));
         Color borderColor = UIManager.getColor("Separator.foreground");
         if (borderColor == null) borderColor = UIManager.getColor("Label.foreground");
         if (borderColor == null) borderColor = Color.GRAY;
@@ -2142,21 +2224,37 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
         if (backgroundColor == null) backgroundColor = Color.WHITE;
         chip.setBorder(BorderFactory.createCompoundBorder(
                 BorderFactory.createLineBorder(borderColor),
-                BorderFactory.createEmptyBorder(4, 8, 4, 6)
+                BorderFactory.createEmptyBorder(6, 10, 6, 10)
         ));
         chip.setOpaque(true);
         chip.setBackground(backgroundColor);
 
-        String icon = attachment.image() ? "🖼" : "📎";
-        JLabel label = new JLabel(icon + " " + attachment.displayName());
-        label.setToolTipText(attachment.path() == null ? attachment.displayName() : attachment.path().toString());
-        chip.add(label);
+        JLabel icon = new JLabel(attachment.image() ? "🖼" : "📎");
+        icon.setFont(icon.getFont().deriveFont(Font.PLAIN, 16f));
+        chip.add(icon, BorderLayout.WEST);
+
+        JPanel textPanel = new JPanel();
+        textPanel.setOpaque(false);
+        textPanel.setLayout(new BoxLayout(textPanel, BoxLayout.Y_AXIS));
+        JLabel title = new JLabel(ChatPanelSupport.formatAttachmentTitle(attachment));
+        title.setToolTipText(attachment.path() == null ? attachment.displayName() : attachment.path().toString());
+        title.setFont(title.getFont().deriveFont(Font.BOLD, 12f));
+        JLabel meta = new JLabel(ChatPanelSupport.formatAttachmentMeta(attachment));
+        meta.setFont(meta.getFont().deriveFont(Font.PLAIN, 11f));
+        meta.setForeground(UIManager.getColor("Label.disabledForeground"));
+        if (meta.getForeground() == null) {
+            meta.setForeground(Color.GRAY);
+        }
+        textPanel.add(title);
+        textPanel.add(meta);
+        chip.add(textPanel, BorderLayout.CENTER);
 
         JButton removeBtn = new JButton("×");
         removeBtn.setMargin(new Insets(0, 4, 0, 4));
         removeBtn.setFocusable(false);
+        removeBtn.setToolTipText("Remove this attachment");
         removeBtn.addActionListener(e -> removeAttachment(index));
-        chip.add(removeBtn);
+        chip.add(removeBtn, BorderLayout.EAST);
         return chip;
     }
 

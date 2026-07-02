@@ -1,8 +1,10 @@
 package plugin.ui;
 
 import org.junit.jupiter.api.Test;
+import plugin.llm.AttachmentData;
 import plugin.llm.model.ChatMessage;
 
+import java.nio.file.Path;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -115,6 +117,50 @@ public class ChatPanelSupportTest {
                 "```bash\nfind . -name \"ChatPanel.java\"\n```"));
         assertFalse(ChatPanelSupport.isNonActionableModelResponse(
                 "Current Project Structure\nFiltered view: IDE/build/generated artifacts are excluded."));
+    }
+
+    @Test
+    void detectsRunTestsIntent() {
+        assertTrue(ChatPanelSupport.isRunTestsIntent("execute all test and show me result"));
+        assertTrue(ChatPanelSupport.isRunTestsIntent("run all test case"));
+        assertTrue(ChatPanelSupport.isRunTestsIntent("mvn test"));
+        assertFalse(ChatPanelSupport.isRunTestsIntent("write a unit test"));
+    }
+
+    @Test
+    void stripsProjectStructureWrappers() {
+        assertEquals("tree\nsrc/\n  main.java", ChatPanelSupport.stripProjectStructureWrappers(
+                "<PROJECT_TREE>tree\nsrc/\n  main.java</PROJECT_TREE>"));
+        assertEquals("tree", ChatPanelSupport.stripProjectStructureWrappers("<PROJECT_STRUCTURE>tree</PROJECT_STRUCTURE>"));
+    }
+
+    @Test
+    void announcesTelemetryPhasesInHumanReadableForm() {
+        assertEquals("Planning the next step…", ChatPanelSupport.telemetryAnnouncement("Planning"));
+        assertEquals("Running tests…", ChatPanelSupport.telemetryAnnouncement("Testing"));
+    }
+
+    @Test
+    void formatsAttachmentChipText() {
+        AttachmentData attachment = new AttachmentData(
+                Path.of("sample.png"),
+                "sample.png",
+                "image/png",
+                true,
+                null,
+                null,
+                1536
+        );
+
+        assertEquals("sample.png", ChatPanelSupport.formatAttachmentTitle(attachment));
+        assertEquals("Image • image/png • 1.5 KB", ChatPanelSupport.formatAttachmentMeta(attachment));
+    }
+
+    @Test
+    void formatsAttachmentSizeHumanReadably() {
+        assertEquals("0 B", ChatPanelSupport.humanReadableBytes(0));
+        assertEquals("512 B", ChatPanelSupport.humanReadableBytes(512));
+        assertEquals("2.0 KB", ChatPanelSupport.humanReadableBytes(2048));
     }
 
     @Test

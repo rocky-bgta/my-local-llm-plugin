@@ -32,11 +32,17 @@ public class PromptBuilderTest {
         assertTrue(editingPrompt.contains("answer directly instead of returning a generic example"));
         assertTrue(editingPrompt.contains("Never answer a repository task with a shell command as the primary output"));
         assertTrue(editingPrompt.contains("do not ask for the repo path again"));
+        assertTrue(editingPrompt.contains("Do not wrap the tree in <PROJECT_TREE> or <PROJECT_STRUCTURE> tags"));
+        assertTrue(editingPrompt.contains("run all tests or show test results"));
+        assertTrue(editingPrompt.contains("the client will run the current workspace's test runner directly"));
         assertTrue(editingPrompt.contains("ANALYSIS TASKS"));
         assertTrue(editingPrompt.contains("project understanding"));
         assertTrue(editingPrompt.contains("update your skill set"));
-        assertTrue(editingPrompt.contains("Do not call EXECUTE_COMMAND at all"));
+        assertTrue(editingPrompt.contains("do not emit RUN_TESTS or EXECUTE_COMMAND tags in normal answers"));
+        assertTrue(editingPrompt.contains("The client handles test execution and terminal commands"));
         assertTrue(planningPrompt.contains("do not wrap output in <PLAN> tags"));
+        assertTrue(!editingPrompt.contains("<RUN_TESTS"));
+        assertTrue(!editingPrompt.contains("<EXECUTE_COMMAND"));
     }
 
     @Test

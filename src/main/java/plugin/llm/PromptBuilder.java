@@ -19,11 +19,10 @@ public final class PromptBuilder {
         sb.append("<CREATE_FILE path=\"<detected-test-path>\">...full content...</CREATE_FILE>\n");
         sb.append("<MODIFY_FILE path=\"<detected-source-path>\">...full content...</MODIFY_FILE>\n");
         sb.append("<DELETE_FILE path=\"src/...\" />\n");
-        sb.append("<RUN_TESTS />  or  <RUN_TESTS test=\"ClassName\" />\n");
         sb.append("<CHECK_COMPILATION />\n");
-        sb.append("<EXECUTE_COMMAND command=\"...\" />\n");
+        sb.append("The client handles test execution and terminal commands; do not emit RUN_TESTS or EXECUTE_COMMAND tags in normal answers.\n");
         sb.append("TEST REQUESTS: write tests directly from retrieved context in the project's native framework. Do not use tree/ls/dir or custom commands to inspect structure. If no symbol is named, choose the most relevant source file in the current workspace and create its test file. Do not turn the request into a generic example; use the real repository class, package, and framework conventions.\n");
-        sb.append("For project structure requests, use the current workspace root. Do not ask which repository or directory to inspect. Do not call EXECUTE_COMMAND at all. Return only the filtered tree of actual project files and folders. The client will render the tree directly. Exclude IDE/build/generated artifacts and keep tree format only.\n");
+        sb.append("For project structure requests, use the current workspace root. Do not ask which repository or directory to inspect. Do not call EXECUTE_COMMAND at all. Return only the filtered tree of actual project files and folders. Do not wrap the tree in <PROJECT_TREE> or <PROJECT_STRUCTURE> tags. The client will render the tree directly. Exclude IDE/build/generated artifacts and keep tree format only.\n");
         sb.append("Normalize obvious user typos internally before acting; infer the intended meaning instead of asking the user to retype the prompt.\n");
         sb.append("Do not ask clarification questions when the repository context is sufficient. Infer the likely task from the current workspace, recent history, attachments, and project conventions, then act.\n");
         sb.append("For supported repository tasks, answer directly instead of returning a generic example, test plan, or template. Write the concrete artifact for the current workspace.\n");
@@ -54,6 +53,7 @@ public final class PromptBuilder {
         sb.append("· If the user asks to delete unnecessary files or clean up code, identify obsolete files or dead code, use DELETE_FILE or refactor changes as appropriate, and explain what was removed.\n");
         sb.append("· If the user asks for tests, README, cleanup, or commit review in the current repository, do not ask for the repo path again; use the current workspace and the retrieved context.\n");
         sb.append("· If the user asks for tests for a named symbol, generate the actual test file in the repository's test framework instead of a generic test checklist or example.\n");
+        sb.append("· If the user asks to run all tests or show test results, the client will run the current workspace's test runner directly; respond with human-readable status and do not emit RUN_TESTS or EXECUTE_COMMAND.\n");
         sb.append("· If the user asks for README.md, create it from the current project structure and environment context instead of asking what the repository contains.\n");
         sb.append("· If the user asks to review the latest commit, use the current repository commit diff and the supplied ticket/spec context; do not ask the user to fetch the commit hash manually.\n");
         sb.append("· If the user asks for project understanding, current file explanation, related files, build failure analysis, dependency analysis, security review, or performance review, answer with concrete repository findings and structured sections.\n");

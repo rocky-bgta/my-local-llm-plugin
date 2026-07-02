@@ -3,6 +3,7 @@ package plugin.ui;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.vfs.VirtualFile;
 import plugin.llm.model.ChatMessage;
+import plugin.llm.AttachmentData;
 import plugin.psi.SourceFileScanner;
 import plugin.util.EnvironmentInfoCollector;
 import plugin.util.ProjectContextUtil;
@@ -151,6 +152,28 @@ final class ChatPanelSupport {
                lower.contains("run test") || lower.contains("execute test") || lower.contains("check test") ||
                lower.contains("add test") || lower.contains("missing test") || lower.contains("test case") ||
                (lower.contains("add") && (lower.contains("file") || lower.contains("class") || lower.contains("method")));
+    }
+
+    static boolean isRunTestsIntent(String userText) {
+        if (userText == null) return false;
+        String lower = userText.toLowerCase();
+        return lower.contains("run all tests")
+                || lower.contains("run all test case")
+                || lower.contains("execute all tests")
+                || lower.contains("execute all test case")
+                || lower.contains("run tests")
+                || lower.contains("execute tests")
+                || lower.contains("run test case")
+                || lower.contains("execute test case")
+                || lower.contains("show me result")
+                || lower.contains("show test result")
+                || lower.contains("run test suite")
+                || lower.contains("mvn test")
+                || lower.contains("gradle test")
+                || lower.contains("npm test")
+                || lower.contains("cargo test")
+                || lower.contains("pytest")
+                || lower.contains("dotnet test");
     }
 
     static boolean isGitAddCreatedFilesIntent(String userText) {
@@ -304,6 +327,72 @@ final class ChatPanelSupport {
 
     static boolean isNonActionableModelResponse(String response) {
         return isClarificationRequest(response) || isShellOrToolResponse(response);
+    }
+
+    static String stripProjectStructureWrappers(String response) {
+        if (response == null || response.isBlank()) return response;
+        String cleaned = response;
+        cleaned = cleaned.replaceAll("(?is)<\\/?PROJECT_TREE\\s*>", "");
+        cleaned = cleaned.replaceAll("(?is)<\\/?PROJECT_STRUCTURE\\s*>", "");
+        cleaned = cleaned.replaceAll("(?is)<PROJECT_TREE[^>]*>", "");
+        cleaned = cleaned.replaceAll("(?is)<PROJECT_STRUCTURE[^>]*>", "");
+        return cleaned.trim();
+    }
+
+    static String telemetryAnnouncement(String activity) {
+        if (activity == null || activity.isBlank()) return "";
+        String lower = activity.toLowerCase();
+        if (lower.contains("plan")) return "Planning the next step…";
+        if (lower.contains("think")) return "Thinking through the request…";
+        if (lower.contains("work")) return "Working on changes…";
+        if (lower.contains("debug")) return "Debugging and checking errors…";
+        if (lower.contains("test")) return "Running tests…";
+        if (lower.contains("review")) return "Reviewing the diff…";
+        if (lower.contains("command") || lower.contains("run")) return "Running a command…";
+        if (lower.contains("interrupt")) return "Interrupted.";
+        if (lower.contains("idle") || lower.contains("ready")) return "Ready.";
+        return activity + "…";
+    }
+
+    static String formatAttachmentTitle(AttachmentData attachment) {
+        if (attachment == null) return "";
+        String title = attachment.displayName();
+        if (title == null || title.isBlank()) {
+            title = "Untitled attachment";
+        }
+        return title;
+    }
+
+    static String formatAttachmentMeta(AttachmentData attachment) {
+        if (attachment == null) return "";
+        List<String> parts = new ArrayList<>();
+        if (attachment.image()) {
+            parts.add("Image");
+        } else {
+            parts.add("File");
+        }
+        if (attachment.mimeType() != null && !attachment.mimeType().isBlank()) {
+            parts.add(attachment.mimeType());
+        }
+        parts.add(humanReadableBytes(attachment.sizeBytes()));
+        return String.join(" • ", parts);
+    }
+
+    static String humanReadableBytes(long sizeBytes) {
+        if (sizeBytes <= 0) {
+            return "0 B";
+        }
+        if (sizeBytes < 1024) {
+            return sizeBytes + " B";
+        }
+        double size = sizeBytes;
+        String[] units = {"KB", "MB", "GB", "TB"};
+        int unitIndex = -1;
+        while (size >= 1024 && unitIndex < units.length - 1) {
+            size /= 1024.0;
+            unitIndex++;
+        }
+        return String.format(java.util.Locale.ROOT, "%.1f %s", size, units[Math.max(unitIndex, 0)]);
     }
 
     static boolean isSkillUpdateIntent(String userText) {

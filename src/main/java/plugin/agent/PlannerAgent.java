@@ -63,13 +63,13 @@ public class PlannerAgent {
                     .addStep("Read project config for the test framework")
                     .addStep("Rerank top-6 files for 7B context budget")
                     .addStep("LLM: generate tests in the project's native framework")
-                    .addStep("Apply CREATE_FILE, then run <RUN_TESTS test=\"" + targetSymbol + "Test\">")
+                    .addStep("Apply CREATE_FILE, then run the generated " + targetSymbol + "Test suite")
                     .withTestStrategy("Project-native framework · happy path + edge cases + failure cases");
             case FIX_BUG -> plan
                     .addStep("PSI: locate failing class")
                     .addStep("BM25: find related error-handling patterns")
                     .addStep("LLM: identify root cause and apply MODIFY_FILE fix")
-                    .addStep("Run <CHECK_COMPILATION /> then <RUN_TESTS />");
+                    .addStep("Run compilation check, then run tests");
             case ADD_FEATURE -> plan
                     .addStep("PSI: analyse integration points in existing architecture")
                     .addStep("BM25: retrieve related components")
@@ -78,7 +78,7 @@ public class PlannerAgent {
             case REFACTOR -> plan
                     .addStep("PSI: find all usages of target")
                     .addStep("LLM: apply refactoring across affected files")
-                    .addStep("Run <CHECK_COMPILATION />");
+                    .addStep("Run compilation check");
             case REVIEW_COMMIT -> plan
                     .addStep("Git: inspect the latest commit diff and branch")
                     .addStep("Jira: compare commit changes to the ticket description")
