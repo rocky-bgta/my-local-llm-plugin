@@ -89,10 +89,14 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
     private JButton      stopBtn;
     private JButton      clearContextBtn;
     private JButton      clearAttachmentsBtn;
-    private JProgressBar spinner;
     private JPanel       attachmentsPanel;
     private JPanel       attachmentCardsPanel;
     private JLabel       attachmentHintLabel;
+    private JLabel       attachmentCountLabel;
+    private JLabel       contextPercentLabel;
+    private JComboBox<String> modelComboBar;
+    private JComboBox<String> reasoningCombo;
+    private String       reasoningLevel = "High";
 
     private int estimatedInputTokens = 0;
     private int estimatedOutputTokens = 0;
@@ -144,6 +148,10 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
     private int statusPulsePhase = 0;
     private final Map<String, JLabel> phaseChipLabels = new LinkedHashMap<>();
 
+    // Empty-state card layout
+    private CardLayout chatCardLayout;
+    private JPanel     chatCardPanel;
+
     public ChatPanel(@NotNull Project project) {
         this.project = project;
         project.putUserData(PANEL_KEY, this);
@@ -153,9 +161,12 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
         statusPulseTimer.setRepeats(true);
 
         root = new JPanel(new BorderLayout());
-        root.add(buildToolbar(),    BorderLayout.NORTH);
-        root.add(buildChatArea(),   BorderLayout.CENTER);
-        root.add(buildInputPanel(), BorderLayout.SOUTH);
+        root.add(buildToolbar(),  BorderLayout.NORTH);
+        root.add(buildChatArea(), BorderLayout.CENTER);
+
+        JPanel southPanel = new JPanel(new BorderLayout(0, 0));
+        southPanel.add(buildInputPanel(), BorderLayout.CENTER);
+        root.add(southPanel, BorderLayout.SOUTH);
 
         // Ctrl+Shift+N = New Chat from anywhere in the panel
         javax.swing.KeyStroke ks = javax.swing.KeyStroke.getKeyStroke(
@@ -172,7 +183,6 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
     public JButton getSendBtn() { return sendBtn; }
     public JButton getStopBtn() { return stopBtn; }
     public JButton getClearContextBtn() { return clearContextBtn; }
-    public JProgressBar getSpinner() { return spinner; }
     public Timer getBlinkTimer() { return blinkTimer; }
     public Timer getStatusPulseTimer() { return statusPulseTimer; }
     public JLabel getTitleLabel() { return titleLabel; }
@@ -198,103 +208,97 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
     // -------------------------------------------------------------------------
 
     JPanel buildToolbar() {
-        JPanel bar = new JPanel();
-        bar.setLayout(new BoxLayout(bar, BoxLayout.Y_AXIS));
+        JPanel bar = new JPanel(new BorderLayout(8, 0));
         bar.setBorder(BorderFactory.createCompoundBorder(
                 BorderFactory.createMatteBorder(0, 0, 1, 0, UIManager.getColor("Separator.foreground")),
-                BorderFactory.createEmptyBorder(4, 8, 6, 8)
+                BorderFactory.createEmptyBorder(6, 12, 6, 8)
         ));
         bar.setOpaque(true);
 
-        titleLabel = new JLabel("  New Chat");
-        titleLabel.setFont(titleLabel.getFont().deriveFont(Font.BOLD, 13f));
+        // Chat title — left side, matches the reference "still current g..." style
+        titleLabel = new JLabel("New Chat");
+        titleLabel.setFont(titleLabel.getFont().deriveFont(Font.PLAIN, 13f));
 
-        modeCombo = new JComboBox<>(new String[]{"PLANNING", "EDITING", "BYPASS"});
-        modeCombo.setSelectedItem("PLANNING");
-        modeCombo.addActionListener(e -> mode = (String) modeCombo.getSelectedItem());
-
+        // Hidden labels kept for telemetry/external access, not displayed in toolbar
         workspaceStatusLabel = new JLabel();
         workspaceStatusLabel.setFont(workspaceStatusLabel.getFont().deriveFont(Font.PLAIN, 11f));
-        workspaceStatusLabel.setBorder(BorderFactory.createEmptyBorder(0, 6, 0, 6));
         workspaceProjectTypeLabel = ChatPanelSupport.projectTypeLabel(project);
         refreshWorkspaceStatus();
 
-        activityLabel = new JLabel();
-        activityLabel.setFont(activityLabel.getFont().deriveFont(Font.BOLD, 12f));
-        activityLabel.setOpaque(true);
-        activityLabel.setBorder(BorderFactory.createCompoundBorder(
-                BorderFactory.createLineBorder(UIManager.getColor("Separator.foreground")),
-                BorderFactory.createEmptyBorder(3, 8, 3, 8)
-        ));
+        activityLabel = new JLabel("Ready");
+        activityLabel.setFont(activityLabel.getFont().deriveFont(Font.PLAIN, 11f));
+        activityLabel.setOpaque(false);
+        activityLabel.setVisible(false);
 
         fileHistoryLabel = new JLabel();
         fileHistoryLabel.setFont(fileHistoryLabel.getFont().deriveFont(Font.PLAIN, 11f));
-        fileHistoryLabel.setBorder(BorderFactory.createEmptyBorder(0, 6, 0, 6));
 
         gitStatusLabel = new JLabel();
         gitStatusLabel.setFont(gitStatusLabel.getFont().deriveFont(Font.PLAIN, 11f));
-        gitStatusLabel.setBorder(BorderFactory.createEmptyBorder(0, 6, 0, 6));
 
         contextBar = new JProgressBar(0, 100);
         contextBar.setStringPainted(true);
-        contextBar.setPreferredSize(new Dimension(140, 16));
-        contextBar.setMaximumSize(new Dimension(220, 18));
+        contextBar.setPreferredSize(new Dimension(120, 16));
+        contextBar.setMaximumSize(new Dimension(160, 16));
+        contextBar.setVisible(false);
+
         refreshTelemetry("Ready", null);
         refreshVersionControlStatus();
         phaseStripPanel = buildPhaseStrip();
 
-        clearContextBtn = new JButton("Clear Context");
-        clearContextBtn.setToolTipText("Clear chat display and reset conversation context (Ctrl+Shift+N)");
+        // ── Right side icons: 🔍 | + | ⬜ | ↺ | ⚙ ────────────────────────────
+        JButton searchBtn = new JButton(AllIcons.Actions.Search);
+        searchBtn.setToolTipText("Search in chat");
+        searchBtn.addActionListener(e -> {
+            // placeholder — extend with chat search if needed
+        });
+        styleIconButton(searchBtn);
+
+        clearContextBtn = new JButton(AllIcons.General.Add);
+        clearContextBtn.setToolTipText("New Chat (Ctrl+Shift+N)");
         clearContextBtn.addActionListener(e -> clearConversation());
+        styleIconButton(clearContextBtn);
+
+        JButton splitBtn = new JButton(AllIcons.Actions.SplitHorizontally);
+        splitBtn.setToolTipText("Toggle split view");
+        styleIconButton(splitBtn);
+
+        JButton historyBtn = new JButton(AllIcons.Actions.Rollback);
+        historyBtn.setToolTipText("History / reset");
+        historyBtn.addActionListener(e -> clearConversation());
+        styleIconButton(historyBtn);
 
         JButton gearBtn = new JButton(AllIcons.General.Settings);
-        gearBtn.setToolTipText("Open settings for local LLM URL, model, MCP, GitLab, and Jira");
-        gearBtn.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
-        gearBtn.setFocusable(false);
-        gearBtn.setBorderPainted(false);
-        gearBtn.setContentAreaFilled(false);
-        gearBtn.setOpaque(false);
-        gearBtn.setFocusPainted(false);
-        gearBtn.setMargin(new Insets(2, 2, 2, 2));
-        gearBtn.setPreferredSize(new Dimension(24, 24));
-        gearBtn.setMinimumSize(new Dimension(24, 24));
-        gearBtn.setMaximumSize(new Dimension(24, 24));
+        gearBtn.setToolTipText("Settings — LLM endpoint, model, integrations");
         gearBtn.addActionListener(e -> showSettingsDialog());
+        styleIconButton(gearBtn);
 
-        JPanel headerRow = new JPanel(new BorderLayout(8, 0));
-        headerRow.setOpaque(false);
-        JPanel headerLeft = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 0));
-        headerLeft.setOpaque(false);
-        headerLeft.add(titleLabel);
-        headerLeft.add(Box.createHorizontalStrut(8));
-        headerLeft.add(new JLabel("Mode:"));
-        headerLeft.add(modeCombo);
-        headerLeft.add(clearContextBtn);
-        JPanel headerRight = new JPanel(new FlowLayout(FlowLayout.RIGHT, 0, 0));
-        headerRight.setOpaque(false);
-        headerRight.add(gearBtn);
-        headerRow.add(headerLeft, BorderLayout.WEST);
-        headerRow.add(headerRight, BorderLayout.EAST);
+        JPanel rightPanel = new JPanel(new FlowLayout(FlowLayout.RIGHT, 2, 0));
+        rightPanel.setOpaque(false);
+        rightPanel.add(searchBtn);
+        rightPanel.add(clearContextBtn);
+        rightPanel.add(splitBtn);
+        rightPanel.add(historyBtn);
+        rightPanel.add(gearBtn);
 
-        JPanel statusRow = new JPanel(new BorderLayout(8, 0));
-        statusRow.setOpaque(false);
-        JPanel statusLeft = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 0));
-        statusLeft.setOpaque(false);
-        statusLeft.add(activityLabel);
-        statusLeft.add(workspaceStatusLabel);
-        statusLeft.add(contextBar);
-        statusLeft.add(fileHistoryLabel);
-        statusLeft.add(gitStatusLabel);
-        statusRow.add(statusLeft, BorderLayout.WEST);
+        bar.add(titleLabel, BorderLayout.WEST);
+        bar.add(rightPanel, BorderLayout.EAST);
 
-        bar.add(headerRow);
-        bar.add(Box.createVerticalStrut(4));
-        bar.add(statusRow);
-        if (phaseStripPanel != null) {
-            phaseStripPanel.setVisible(false);
-        }
-
+        if (phaseStripPanel != null) phaseStripPanel.setVisible(false);
         return bar;
+    }
+
+    private static void styleIconButton(JButton btn) {
+        btn.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
+        btn.setFocusable(false);
+        btn.setBorderPainted(false);
+        btn.setContentAreaFilled(false);
+        btn.setOpaque(false);
+        btn.setFocusPainted(false);
+        btn.setMargin(new Insets(2, 2, 2, 2));
+        btn.setPreferredSize(new Dimension(28, 28));
+        btn.setMinimumSize(new Dimension(28, 28));
+        btn.setMaximumSize(new Dimension(28, 28));
     }
 
     private JPanel buildPhaseStrip() {
@@ -328,7 +332,7 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
         scrollPane.setBorder(BorderFactory.createEmptyBorder());
         dialog.setContentPane(scrollPane);
         dialog.pack();
-        dialog.setMinimumSize(new Dimension(720, 640));
+        dialog.setMinimumSize(new Dimension(520, 460));
         dialog.setLocationRelativeTo(root);
         dialog.setResizable(true);
         dialog.setVisible(true);
@@ -380,6 +384,14 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
                         models.forEach(modelCombo::addItem);
                         if (s.getModel() != null && models.contains(s.getModel())) {
                             modelCombo.setSelectedItem(s.getModel());
+                        }
+                        if (modelComboBar != null && !models.isEmpty()) {
+                            String current = s.getModel();
+                            modelComboBar.removeAllItems();
+                            models.forEach(modelComboBar::addItem);
+                            if (current != null && models.contains(current)) {
+                                modelComboBar.setSelectedItem(current);
+                            }
                         }
                         statusLabel.setText("Loaded " + models.size() + " model(s).");
                         refreshBtn.setEnabled(true);
@@ -471,7 +483,15 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
             s.setEndpoint(endpointField.getText().trim());
             s.setIncludeFullContext(contextCheck.isSelected());
             Object sel = modelCombo.getSelectedItem();
-            if (sel != null && !sel.toString().isBlank()) s.setModel(sel.toString());
+            if (sel != null && !sel.toString().isBlank()) {
+                s.setModel(sel.toString());
+                if (modelComboBar != null) {
+                    String m = sel.toString();
+                    modelComboBar.removeAllItems();
+                    modelComboBar.addItem(m);
+                    modelComboBar.setSelectedItem(m);
+                }
+            }
             s.setGitlabCliPath(gitlabCliPathField.getText().trim());
             s.setGitlabProject(gitlabProjectField.getText().trim());
             s.setGitlabApiUrl(gitlabApiUrlField.getText().trim());
@@ -484,21 +504,26 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
             dialog.dispose();
         });
 
+        JPanel endpointPanel = new JPanel(new BorderLayout(6, 0));
+        endpointPanel.setOpaque(false);
+        endpointPanel.add(endpointField, BorderLayout.CENTER);
+        endpointPanel.add(refreshBtn, BorderLayout.EAST);
+
         JPanel form = new JPanel(new GridBagLayout());
-        form.setBorder(new EmptyBorder(14, 18, 14, 18));
+        form.setBorder(new EmptyBorder(10, 14, 10, 14));
 
         GridBagConstraints lc = new GridBagConstraints();
         lc.anchor = GridBagConstraints.WEST;
-        lc.insets = new Insets(5, 0, 5, 10);
+        lc.insets = new Insets(3, 0, 3, 8);
 
         GridBagConstraints fc = new GridBagConstraints();
         fc.fill      = GridBagConstraints.HORIZONTAL;
         fc.weightx   = 1.0;
         fc.gridwidth = GridBagConstraints.REMAINDER;
-        fc.insets    = new Insets(5, 0, 5, 0);
+        fc.insets    = new Insets(3, 0, 3, 0);
 
-        addFormRow(form, "Endpoint:", endpointField, lc, fc, 0);
-        fc.gridy = 1; form.add(refreshBtn,  fc);
+        addFormRow(form, "Endpoint:", endpointPanel, lc, fc, 0);
+        fc.gridy = 1; fc.insets = new Insets(0, 0, 4, 0); form.add(statusLabel, fc); fc.insets = new Insets(3, 0, 3, 0);
         addFormRow(form, "Model:",    modelCombo,    lc, fc, 2);
         fc.gridy = 3; form.add(contextCheck, fc);
         addSectionHeader(form, "Integrations", lc, fc, 4);
@@ -514,16 +539,16 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
         addFormRow(form, "MCP server URL:", mcpServerUrlField, lc, fc, 14);
         addFormRow(form, "MCP protocol:", mcpProtocolField, lc, fc, 15);
         fc.gridy = 16;
-        JPanel mcpButtonRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 0));
+        JPanel mcpButtonRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 0));
         mcpButtonRow.setOpaque(false);
         mcpButtonRow.add(testMcpBtn);
         mcpButtonRow.add(testDockerBtn);
         mcpButtonRow.add(testHelmBtn);
         mcpButtonRow.add(manageSkillsBtn);
         form.add(mcpButtonRow, fc);
-        fc.gridy = 17; form.add(saveBtn,     fc);
-        fc.gridy = 18; form.add(statusLabel, fc);
-        fc.gridy = 19; form.add(integrationStatusLabel, fc);
+        fc.gridy = 17; form.add(integrationStatusLabel, fc);
+        fc.gridy = 18; fc.fill = GridBagConstraints.NONE; fc.anchor = GridBagConstraints.EAST;
+        form.add(saveBtn, fc);
 
         return form;
     }
@@ -540,10 +565,10 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
         lc.gridx = 0;
         lc.gridy = row;
         lc.gridwidth = GridBagConstraints.REMAINDER;
-        lc.insets = new Insets(12, 0, 2, 0);
+        lc.insets = new Insets(8, 0, 2, 0);
         p.add(header, lc);
         lc.gridwidth = 1;
-        lc.insets = new Insets(5, 0, 5, 10);
+        lc.insets = new Insets(3, 0, 3, 8);
         fc.gridy = row;
     }
 
@@ -582,6 +607,9 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
                                            JLabel statusLabel,
                                            String integrationName,
                                            java.util.function.Supplier<IntegrationAccessUtil.IntegrationTestResult> task) {
+        String label = button.getText().replaceFirst("^[✓✗] ", "");
+        button.setText(label);
+        button.setForeground(null);
         button.setEnabled(false);
         statusLabel.setText(integrationName + ": testing…");
         daemon(() -> {
@@ -594,6 +622,13 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
             final IntegrationAccessUtil.IntegrationTestResult finalResult = result;
             SwingUtilities.invokeLater(() -> {
                 button.setEnabled(true);
+                if (finalResult.success()) {
+                    button.setText("✓ " + label);
+                    button.setForeground(new Color(0x4EC9B0));
+                } else {
+                    button.setText("✗ " + label);
+                    button.setForeground(new Color(0xCC3333));
+                }
                 statusLabel.setText(IntegrationAccessUtil.summarizeResult(integrationName, finalResult));
                 statusLabel.setToolTipText(statusLabel.getText());
             });
@@ -604,7 +639,7 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
     // Chat area — styled JTextPane, always-on scroll bar
     // -------------------------------------------------------------------------
 
-    JScrollPane buildChatArea() {
+    JPanel buildChatArea() {
         chatPane = new JTextPane();
         chatPane.setEditable(false);
         chatPane.setMargin(new Insets(10, 12, 10, 12));
@@ -615,7 +650,40 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
         JScrollPane scroll = new JScrollPane(chatPane);
         scroll.setBorder(BorderFactory.createEmptyBorder());
         scroll.getVerticalScrollBar().setUnitIncrement(16);
-        return scroll;
+
+        chatCardLayout = new CardLayout();
+        chatCardPanel  = new JPanel(chatCardLayout);
+        chatCardPanel.add(buildEmptyState(), "empty");
+        chatCardPanel.add(scroll, "chat");
+        chatCardLayout.show(chatCardPanel, "empty");
+        return chatCardPanel;
+    }
+
+    private JPanel buildEmptyState() {
+        JPanel panel = new JPanel(new GridBagLayout());
+        panel.setOpaque(false);
+
+        JPanel content = new JPanel();
+        content.setOpaque(false);
+        content.setLayout(new BoxLayout(content, BoxLayout.Y_AXIS));
+
+        JLabel iconLabel = new JLabel("⬡");
+        iconLabel.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 54));
+        iconLabel.setForeground(new Color(0xCE9178));
+        iconLabel.setAlignmentX(Component.CENTER_ALIGNMENT);
+
+        JLabel hintLabel = new JLabel("Send a message to Local LLM");
+        hintLabel.setFont(hintLabel.getFont().deriveFont(Font.PLAIN, 13f));
+        Color muted = UIManager.getColor("Label.disabledForeground");
+        hintLabel.setForeground(muted != null ? muted : Color.GRAY);
+        hintLabel.setAlignmentX(Component.CENTER_ALIGNMENT);
+
+        content.add(iconLabel);
+        content.add(Box.createVerticalStrut(14));
+        content.add(hintLabel);
+
+        panel.add(content);
+        return panel;
     }
 
     private void initStyles() {
@@ -657,69 +725,145 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
     // -------------------------------------------------------------------------
 
     JPanel buildInputPanel() {
-        JPanel panel = new JPanel(new BorderLayout(0, 8));
-        panel.setBorder(BorderFactory.createCompoundBorder(
-                BorderFactory.createMatteBorder(1, 0, 0, 0, UIManager.getColor("Separator.foreground")),
-                BorderFactory.createEmptyBorder(8, 12, 12, 12)
-        ));
+        JPanel panel = new JPanel(new BorderLayout(0, 0));
+        Color sep = UIManager.getColor("Separator.foreground");
+        if (sep == null) sep = new Color(0x3C3F41);
+        panel.setBorder(BorderFactory.createMatteBorder(1, 0, 0, 0, sep));
 
-        attachmentsPanel = new JPanel(new BorderLayout(0, 8));
-        attachmentsPanel.setOpaque(false);
-        Color attachmentBorderColor = UIManager.getColor("Separator.foreground");
-        if (attachmentBorderColor == null) attachmentBorderColor = Color.GRAY;
-        attachmentsPanel.setBorder(BorderFactory.createCompoundBorder(
-                BorderFactory.createLineBorder(attachmentBorderColor),
-                BorderFactory.createEmptyBorder(5, 6, 5, 6)
-        ));
-        JPanel attachmentHeader = new JPanel(new BorderLayout(8, 0));
-        attachmentHeader.setOpaque(false);
-        JLabel attachmentTitle = new JLabel("Attachments");
-        attachmentTitle.setFont(attachmentTitle.getFont().deriveFont(Font.BOLD, 12f));
-        attachmentHintLabel = new JLabel();
-        attachmentHintLabel.setFont(attachmentHintLabel.getFont().deriveFont(Font.PLAIN, 11f));
-        attachmentHintLabel.setForeground(UIManager.getColor("Label.disabledForeground"));
-        if (attachmentHintLabel.getForeground() == null) {
-            attachmentHintLabel.setForeground(Color.GRAY);
-        }
-        JPanel attachmentTitlePanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 0));
-        attachmentTitlePanel.setOpaque(false);
-        attachmentTitlePanel.add(attachmentTitle);
-        attachmentTitlePanel.add(Box.createHorizontalStrut(8));
-        attachmentTitlePanel.add(attachmentHintLabel);
-
-        clearAttachmentsBtn = new JButton("Clear Attachments");
-        clearAttachmentsBtn.setToolTipText("Remove all dropped attachments before sending");
-        clearAttachmentsBtn.addActionListener(e -> clearAttachments());
-        clearAttachmentsBtn.setVisible(false);
-        clearAttachmentsBtn.setFocusable(false);
-        attachmentHeader.add(attachmentTitlePanel, BorderLayout.WEST);
-        attachmentHeader.add(clearAttachmentsBtn, BorderLayout.EAST);
-
+        // ── Hidden attachment store (TransferHandler target, data-only) ───────
+        attachmentsPanel = new JPanel(new BorderLayout());
+        attachmentsPanel.setVisible(false);
         attachmentCardsPanel = new JPanel();
         attachmentCardsPanel.setOpaque(false);
         attachmentCardsPanel.setLayout(new BoxLayout(attachmentCardsPanel, BoxLayout.Y_AXIS));
-
-        JScrollPane attachmentScroll = new JScrollPane(attachmentCardsPanel);
-        attachmentScroll.setBorder(BorderFactory.createEmptyBorder());
-        attachmentScroll.setHorizontalScrollBarPolicy(ScrollPaneConstants.HORIZONTAL_SCROLLBAR_NEVER);
-        attachmentScroll.setVerticalScrollBarPolicy(ScrollPaneConstants.VERTICAL_SCROLLBAR_AS_NEEDED);
-        attachmentScroll.getViewport().setOpaque(false);
-        attachmentScroll.setOpaque(false);
-        attachmentScroll.setPreferredSize(new Dimension(0, 44));
-        attachmentScroll.setMaximumSize(new Dimension(Integer.MAX_VALUE, 52));
-
-        attachmentsPanel.add(attachmentHeader, BorderLayout.NORTH);
-        attachmentsPanel.add(attachmentScroll, BorderLayout.CENTER);
+        attachmentHintLabel = new JLabel();
+        clearAttachmentsBtn = new JButton("Clear");
+        clearAttachmentsBtn.setVisible(false);
+        clearAttachmentsBtn.setFocusable(false);
+        clearAttachmentsBtn.addActionListener(e -> clearAttachments());
+        attachmentsPanel.add(attachmentCardsPanel, BorderLayout.CENTER);
         attachmentsPanel.setTransferHandler(buildAttachmentTransferHandler());
-        refreshAttachmentStrip();
 
-        promptArea = new JTextArea(4, 0);
-        promptArea.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 16));
+        // ── TOP INFO STRIP  📎 | ◌ % | File Context | ▾ | ↺ ─────────────────
+        final Color finalSep = sep;
+        JPanel topStrip = new JPanel(new BorderLayout(0, 0));
+        topStrip.setOpaque(true);
+        topStrip.setBackground(UIManager.getColor("Panel.background"));
+        topStrip.setBorder(BorderFactory.createCompoundBorder(
+                BorderFactory.createMatteBorder(1, 1, 1, 1, finalSep),
+                BorderFactory.createEmptyBorder(4, 10, 4, 10)
+        ));
+
+        JPanel topLeft = new JPanel(new FlowLayout(FlowLayout.LEFT, 5, 0));
+        topLeft.setOpaque(false);
+
+        JButton attachBtn = new JButton("📎");
+        attachBtn.setFont(attachBtn.getFont().deriveFont(Font.PLAIN, 13f));
+        attachBtn.setToolTipText("Attach files (drag & drop also supported)");
+        attachBtn.setBorderPainted(false);
+        attachBtn.setContentAreaFilled(false);
+        attachBtn.setOpaque(false);
+        attachBtn.setFocusPainted(false);
+        attachBtn.setFocusable(false);
+        attachBtn.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
+        attachBtn.setMargin(new Insets(0, 0, 0, 0));
+        attachBtn.addActionListener(e -> showAttachmentPopup(attachBtn));
+
+        attachmentCountLabel = new JLabel();
+        attachmentCountLabel.setFont(attachmentCountLabel.getFont().deriveFont(Font.BOLD, 10f));
+        attachmentCountLabel.setForeground(new Color(0xE05A2B));
+        attachmentCountLabel.setVisible(false);
+
+        JPanel sv1 = makeVSep();
+        JPanel sv2 = makeVSep();
+
+        contextPercentLabel = new JLabel("◌ 0%");
+        contextPercentLabel.setFont(contextPercentLabel.getFont().deriveFont(Font.PLAIN, 11f));
+        Color muted = UIManager.getColor("Label.disabledForeground");
+        if (muted == null) muted = Color.GRAY;
+        contextPercentLabel.setForeground(muted);
+        contextPercentLabel.setToolTipText("Estimated context window usage");
+
+        JLabel fileContextLabel = new JLabel("File Context");
+        fileContextLabel.setFont(fileContextLabel.getFont().deriveFont(Font.PLAIN, 11f));
+
+        JLabel fileContextArrow = new JLabel("▾");
+        fileContextArrow.setFont(fileContextArrow.getFont().deriveFont(Font.PLAIN, 10f));
+        fileContextArrow.setForeground(muted);
+
+        topLeft.add(attachBtn);
+        topLeft.add(attachmentCountLabel);
+        topLeft.add(sv1);
+        topLeft.add(contextPercentLabel);
+        topLeft.add(sv2);
+        topLeft.add(fileContextLabel);
+        topLeft.add(fileContextArrow);
+
+        JPanel topRight = new JPanel(new FlowLayout(FlowLayout.RIGHT, 4, 0));
+        topRight.setOpaque(false);
+
+        JButton expandBtn = new JButton(AllIcons.General.ExpandComponent);
+        expandBtn.setToolTipText("Expand input panel");
+        expandBtn.setBorderPainted(false);
+        expandBtn.setContentAreaFilled(false);
+        expandBtn.setFocusPainted(false);
+        expandBtn.setFocusable(false);
+        expandBtn.setOpaque(false);
+        expandBtn.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
+        expandBtn.setMargin(new Insets(0, 2, 0, 2));
+        expandBtn.setPreferredSize(new Dimension(22, 22));
+
+        JButton undoBtn = new JButton("↺");
+        undoBtn.setFont(undoBtn.getFont().deriveFont(Font.PLAIN, 14f));
+        undoBtn.setToolTipText("New chat (Ctrl+Shift+N)");
+        undoBtn.setBorderPainted(false);
+        undoBtn.setContentAreaFilled(false);
+        undoBtn.setFocusPainted(false);
+        undoBtn.setFocusable(false);
+        undoBtn.setOpaque(false);
+        undoBtn.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
+        undoBtn.setMargin(new Insets(0, 2, 0, 2));
+        undoBtn.addActionListener(e -> clearConversation());
+
+        topRight.add(expandBtn);
+        topRight.add(undoBtn);
+
+        topStrip.add(topLeft, BorderLayout.WEST);
+        topStrip.add(topRight, BorderLayout.EAST);
+
+        // ── PROMPT AREA with placeholder ──────────────────────────────────────
+        Color editorBg = UIManager.getColor("Editor.background");
+        if (editorBg == null) editorBg = new Color(0x1E1E1E);
+        final Color finalEditorBg = editorBg;
+        final Color hintCol = muted;
+
+        promptArea = new JTextArea(5, 0) {
+            @Override
+            protected void paintComponent(Graphics g) {
+                super.paintComponent(g);
+                if (getText().isEmpty()) {
+                    Graphics2D g2 = (Graphics2D) g.create();
+                    g2.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING,
+                            RenderingHints.VALUE_TEXT_ANTIALIAS_ON);
+                    g2.setColor(hintCol);
+                    g2.setFont(getFont());
+                    Insets ins = getInsets();
+                    g2.drawString("@reference files, #invoke agents, !insert prompts, Enter to send",
+                            ins.left, ins.top + g2.getFontMetrics().getAscent());
+                    g2.dispose();
+                }
+            }
+        };
+        Font inputFont = new Font("Segoe UI", Font.PLAIN, 14);
+        if (!"Segoe UI".equals(inputFont.getFamily())) {
+            inputFont = new Font(Font.SANS_SERIF, Font.PLAIN, 14);
+        }
+        promptArea.setFont(inputFont);
         promptArea.setLineWrap(true);
         promptArea.setWrapStyleWord(true);
-        promptArea.setMargin(new Insets(6, 8, 6, 8));
+        promptArea.setBackground(finalEditorBg);
+        promptArea.setMargin(new Insets(10, 12, 10, 12));
         promptArea.setToolTipText(null);
-        // Enter = send   |   Shift+Enter = newline
         promptArea.addKeyListener(new KeyAdapter() {
             @Override
             public void keyPressed(KeyEvent e) {
@@ -733,18 +877,13 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
                     }
                     return;
                 }
-
                 if (e.getKeyCode() == KeyEvent.VK_UP || e.getKeyCode() == KeyEvent.VK_DOWN) {
                     if (shouldUsePromptHistoryNavigation(e.getKeyCode())) {
                         e.consume();
                         boolean up = e.getKeyCode() == KeyEvent.VK_UP;
                         ChatPanelSupport.PromptHistoryState state = ChatPanelSupport.navigatePromptHistory(
-                                promptHistory,
-                                promptArea.getText(),
-                                promptHistoryIndex,
-                                promptHistoryDraft,
-                                up
-                        );
+                                promptHistory, promptArea.getText(),
+                                promptHistoryIndex, promptHistoryDraft, up);
                         promptHistoryIndex = state.index();
                         promptHistoryDraft = state.draft();
                         promptArea.setText(state.displayedText());
@@ -752,7 +891,6 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
                         return;
                     }
                 }
-
                 if (shouldResetPromptHistoryNavigation(e)) {
                     resetPromptHistoryNavigation();
                 }
@@ -760,46 +898,221 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
         });
 
         JScrollPane promptScroll = new JScrollPane(promptArea);
+        promptScroll.setBorder(BorderFactory.createEmptyBorder());
         promptScroll.setVerticalScrollBarPolicy(ScrollPaneConstants.VERTICAL_SCROLLBAR_AS_NEEDED);
         promptScroll.setHorizontalScrollBarPolicy(ScrollPaneConstants.HORIZONTAL_SCROLLBAR_NEVER);
+        promptScroll.setOpaque(false);
+        promptScroll.setBackground(finalEditorBg);
+        promptScroll.getViewport().setBackground(finalEditorBg);
         promptScroll.setTransferHandler(buildAttachmentTransferHandler());
         promptArea.setTransferHandler(buildAttachmentTransferHandler());
         root.setTransferHandler(buildAttachmentTransferHandler());
 
-        sendBtn = new JButton("Send");
-        sendBtn.setPreferredSize(new Dimension(80, 28));
+        // ── BOTTOM TOOLBAR ────────────────────────────────────────────────────
+        // ⚙ | ⚡ Mode▼ | ✳ Model▼ | 💡 Reasoning▼          stop | ▶
+        modeCombo = new JComboBox<>(new String[]{"PLANNING", "EDITING", "BYPASS"});
+        modeCombo.setSelectedItem("PLANNING");
+        modeCombo.addActionListener(e -> mode = (String) modeCombo.getSelectedItem());
+        modeCombo.setFont(modeCombo.getFont().deriveFont(Font.PLAIN, 11f));
+        modeCombo.setPreferredSize(new Dimension(128, 24));
+        modeCombo.setMinimumSize(new Dimension(88, 24));
+        modeCombo.setMaximumSize(new Dimension(128, 24));
+        modeCombo.setFocusable(false);
+        modeCombo.setRenderer(new DefaultListCellRenderer() {
+            @Override
+            public Component getListCellRendererComponent(JList<?> list, Object value, int index, boolean isSelected, boolean cellHasFocus) {
+                super.getListCellRendererComponent(list, value, index, isSelected, cellHasFocus);
+                if ("PLANNING".equals(value)) setText("Plan Mode");
+                else if ("EDITING".equals(value)) setText("Edit Mode");
+                else if ("BYPASS".equals(value)) setText("Auto Mode");
+                return this;
+            }
+        });
+
+        modelComboBar = new JComboBox<>();
+        PluginSettings ps = PluginSettings.getInstance();
+        if (ps.getModel() != null && !ps.getModel().isBlank()) {
+            modelComboBar.addItem(ps.getModel());
+            modelComboBar.setSelectedItem(ps.getModel());
+        }
+        modelComboBar.setFont(modelComboBar.getFont().deriveFont(Font.PLAIN, 11f));
+        modelComboBar.setPreferredSize(new Dimension(170, 24));
+        modelComboBar.setMinimumSize(new Dimension(80, 24));
+        modelComboBar.setMaximumSize(new Dimension(170, 24));
+        modelComboBar.setFocusable(false);
+        modelComboBar.setToolTipText("Active model — open Settings to fetch all available models");
+        modelComboBar.addActionListener(e -> {
+            Object sel = modelComboBar.getSelectedItem();
+            if (sel != null && !sel.toString().isBlank()) {
+                PluginSettings.getInstance().setModel(sel.toString());
+            }
+        });
+
+        reasoningCombo = new JComboBox<>(new String[]{"Low", "Medium", "High", "Max"});
+        reasoningCombo.setSelectedItem("High");
+        reasoningCombo.setFont(reasoningCombo.getFont().deriveFont(Font.PLAIN, 11f));
+        reasoningCombo.setPreferredSize(new Dimension(90, 24));
+        reasoningCombo.setMinimumSize(new Dimension(64, 24));
+        reasoningCombo.setMaximumSize(new Dimension(90, 24));
+        reasoningCombo.setFocusable(false);
+        reasoningCombo.setToolTipText("Reasoning depth");
+        reasoningCombo.addActionListener(e -> reasoningLevel = (String) reasoningCombo.getSelectedItem());
+
+        sendBtn = new JButton("▶") {
+            @Override
+            protected void paintComponent(Graphics g) {
+                Graphics2D g2 = (Graphics2D) g.create();
+                g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+                g2.setColor(isEnabled() ? new Color(0x4A7FD4) : new Color(0x2B4A7A));
+                g2.fillRoundRect(0, 0, getWidth(), getHeight(), 8, 8);
+                g2.dispose();
+                super.paintComponent(g);
+            }
+        };
+        sendBtn.setFont(sendBtn.getFont().deriveFont(Font.BOLD, 13f));
+        sendBtn.setForeground(Color.WHITE);
+        sendBtn.setPreferredSize(new Dimension(36, 32));
+        sendBtn.setMinimumSize(new Dimension(36, 32));
+        sendBtn.setMaximumSize(new Dimension(36, 32));
+        sendBtn.setBorderPainted(false);
+        sendBtn.setContentAreaFilled(false);
+        sendBtn.setFocusPainted(false);
+        sendBtn.setOpaque(false);
+        sendBtn.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
         sendBtn.addActionListener(e -> sendMessage());
 
-        stopBtn = new JButton("Stop", AllIcons.Actions.Suspend);
-        stopBtn.setPreferredSize(new Dimension(80, 28));
+        stopBtn = new JButton("■") {
+            @Override
+            protected void paintComponent(Graphics g) {
+                Graphics2D g2 = (Graphics2D) g.create();
+                g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+                g2.setColor(new Color(0xCC3333));
+                g2.fillRoundRect(0, 0, getWidth(), getHeight(), 8, 8);
+                g2.dispose();
+                super.paintComponent(g);
+            }
+        };
+        stopBtn.setFont(stopBtn.getFont().deriveFont(Font.BOLD, 13f));
+        stopBtn.setForeground(Color.WHITE);
+        stopBtn.setPreferredSize(new Dimension(36, 32));
+        stopBtn.setMinimumSize(new Dimension(36, 32));
+        stopBtn.setMaximumSize(new Dimension(36, 32));
+        stopBtn.setBorderPainted(false);
+        stopBtn.setContentAreaFilled(false);
+        stopBtn.setFocusPainted(false);
+        stopBtn.setOpaque(false);
+        stopBtn.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
         stopBtn.setVisible(false);
         stopBtn.addActionListener(e -> {
             stopRequested = true;
-            if (currentChatThread != null) {
-                currentChatThread.interrupt();
-            }
+            if (currentChatThread != null) currentChatThread.interrupt();
             appendSystemMessage("Interrupted by user.");
             setLoading(false);
         });
 
-        spinner = new JProgressBar();
-        spinner.setIndeterminate(false);
-        spinner.setPreferredSize(new Dimension(80, 14));
-        spinner.setVisible(false);
+        JButton settingsBtn = new JButton(AllIcons.General.Settings);
+        settingsBtn.setToolTipText("Settings — LLM endpoint, model, integrations");
+        settingsBtn.addActionListener(e -> showSettingsDialog());
+        styleIconButton(settingsBtn);
 
-        JPanel ctrlRow  = new JPanel(new BorderLayout(4, 0));
-        JPanel leftCtrl = new JPanel(new FlowLayout(FlowLayout.LEFT, 4, 0));
-        leftCtrl.add(spinner);
-        ctrlRow.add(leftCtrl, BorderLayout.WEST);
-        JPanel rightCtrl = new JPanel(new FlowLayout(FlowLayout.RIGHT, 4, 0));
-        rightCtrl.add(stopBtn);
-        rightCtrl.add(sendBtn);
-        ctrlRow.add(rightCtrl, BorderLayout.EAST);
+        JLabel modeIcon = new JLabel("⚡");
+        modeIcon.setFont(modeIcon.getFont().deriveFont(Font.PLAIN, 13f));
+        modeIcon.setForeground(new Color(0xE05A2B));
 
-        panel.add(attachmentsPanel, BorderLayout.NORTH);
-        panel.add(promptScroll, BorderLayout.CENTER);
-        panel.add(ctrlRow,      BorderLayout.SOUTH);
+        JLabel modelIcon = new JLabel("✳");
+        modelIcon.setFont(modelIcon.getFont().deriveFont(Font.PLAIN, 12f));
+        modelIcon.setForeground(new Color(0xE05A2B));
+
+        JLabel reasonIcon = new JLabel("💡");
+        reasonIcon.setFont(reasonIcon.getFont().deriveFont(Font.PLAIN, 12f));
+
+        JPanel bottomLeft = new JPanel();
+        bottomLeft.setLayout(new BoxLayout(bottomLeft, BoxLayout.X_AXIS));
+        bottomLeft.setOpaque(false);
+        bottomLeft.add(settingsBtn);
+        bottomLeft.add(Box.createHorizontalStrut(3));
+        bottomLeft.add(modeIcon);
+        bottomLeft.add(Box.createHorizontalStrut(3));
+        bottomLeft.add(modeCombo);
+        bottomLeft.add(Box.createHorizontalStrut(5));
+        bottomLeft.add(modelIcon);
+        bottomLeft.add(Box.createHorizontalStrut(3));
+        bottomLeft.add(modelComboBar);
+        bottomLeft.add(Box.createHorizontalStrut(5));
+        bottomLeft.add(reasonIcon);
+        bottomLeft.add(Box.createHorizontalStrut(3));
+        bottomLeft.add(reasoningCombo);
+        bottomLeft.add(Box.createHorizontalGlue());
+
+        JPanel bottomRight = new JPanel(new FlowLayout(FlowLayout.RIGHT, 4, 0));
+        bottomRight.setOpaque(false);
+        bottomRight.add(stopBtn);
+        bottomRight.add(sendBtn);
+
+        JPanel bottomBar = new JPanel(new BorderLayout(4, 0));
+        bottomBar.setOpaque(false);
+        bottomBar.setBorder(BorderFactory.createEmptyBorder(6, 8, 8, 8));
+        bottomBar.add(bottomLeft, BorderLayout.CENTER);
+        bottomBar.add(bottomRight, BorderLayout.EAST);
+
+        JPanel promptWrapper = new JPanel(new BorderLayout(0, 0));
+        promptWrapper.setOpaque(true);
+        promptWrapper.setBackground(finalEditorBg);
+        promptWrapper.add(promptScroll, BorderLayout.CENTER);
+
+        panel.add(topStrip,     BorderLayout.NORTH);
+        panel.add(promptWrapper, BorderLayout.CENTER);
+        panel.add(bottomBar,    BorderLayout.SOUTH);
+
+        // Blue focus border when textarea is active
+        final Color sepColor = sep;
+        final Color focusColor = new Color(0x4A7FD4);
+        promptArea.addFocusListener(new java.awt.event.FocusAdapter() {
+            @Override
+            public void focusGained(java.awt.event.FocusEvent e) {
+                panel.setBorder(BorderFactory.createMatteBorder(1, 1, 1, 1, focusColor));
+            }
+            @Override
+            public void focusLost(java.awt.event.FocusEvent e) {
+                panel.setBorder(BorderFactory.createMatteBorder(1, 0, 0, 0, sepColor));
+            }
+        });
+
+        refreshAttachmentStrip();
         return panel;
+    }
+
+    private JPanel makeVSep() {
+        JPanel p = new JPanel();
+        p.setOpaque(true);
+        Color c = UIManager.getColor("Separator.foreground");
+        p.setBackground(c != null ? c : new Color(0x4A4A4A));
+        p.setPreferredSize(new Dimension(1, 14));
+        p.setMaximumSize(new Dimension(1, 14));
+        return p;
+    }
+
+    private void showAttachmentPopup(Component anchor) {
+        JPopupMenu popup = new JPopupMenu();
+        if (pendingAttachments.isEmpty()) {
+            JMenuItem empty = new JMenuItem("No files attached");
+            empty.setEnabled(false);
+            popup.add(empty);
+        } else {
+            for (int i = 0; i < pendingAttachments.size(); i++) {
+                AttachmentData a = pendingAttachments.get(i);
+                final int idx = i;
+                JMenuItem item = new JMenuItem(ChatPanelSupport.formatAttachmentTitle(a) + "  ×");
+                item.setToolTipText(a.path() != null ? a.path().toString() : a.displayName());
+                item.addActionListener(e -> removeAttachment(idx));
+                popup.add(item);
+            }
+            popup.addSeparator();
+            JMenuItem clearAll = new JMenuItem("Clear all attachments");
+            clearAll.addActionListener(e -> clearAttachments());
+            popup.add(clearAll);
+        }
+        popup.show(anchor, 0, anchor.getHeight());
     }
 
     // -------------------------------------------------------------------------
@@ -1474,6 +1787,9 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
 
     private void insert(String text, Style style) {
         try {
+            if (chatCardLayout != null && chatCardPanel != null) {
+                chatCardLayout.show(chatCardPanel, "chat");
+            }
             chatDoc.insertString(chatDoc.getLength(), text, style);
         } catch (BadLocationException ignored) {}
     }
@@ -1947,11 +2263,13 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
 
         sendBtn.setEnabled(!loading);
         stopBtn.setVisible(loading);
-        spinner.setIndeterminate(loading);
-        spinner.setVisible(loading);
         promptArea.setEnabled(!loading);
         refreshTelemetry(loading ? "Working" : "Ready", null);
+
         if (!loading) {
+            if (contextPercentLabel != null) {
+                contextPercentLabel.setText("◌ " + currentContextUsagePercent + "%");
+            }
             promptArea.requestFocusInWindow();
             showDoneNotification();
         }
@@ -2002,13 +2320,15 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
         chatPane.setStyledDocument(chatDoc);
         titleGenerated = false;
         buildFixAttempts = 0;
-        titleLabel.setText("  New Chat");
+        titleLabel.setText("New Chat");
         if (tabContent != null) tabContent.setDisplayName("New Chat");
         refreshWorkspaceStatus();
         refreshTelemetry("Ready", null);
         refreshVersionControlStatus();
         refreshAttachmentStrip();
-        appendSystemMessage("Chat cleared. New conversation started.");
+        if (chatCardLayout != null && chatCardPanel != null) {
+            chatCardLayout.show(chatCardPanel, "empty");
+        }
         promptArea.requestFocusInWindow();
         lastCompileFingerprint = "";
         lastTestFingerprint    = "";
@@ -2087,6 +2407,10 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
             contextBar.setValue(currentContextUsagePercent);
             contextBar.setString("Context " + currentContextUsagePercent + "%");
             contextBar.setToolTipText("Estimated context usage: " + currentContextUsagePercent + "% of ~" + CONTEXT_BUDGET_TOKENS + " tokens.");
+        }
+        if (contextPercentLabel != null) {
+            contextPercentLabel.setText("◌ " + currentContextUsagePercent + "%");
+            contextPercentLabel.setToolTipText("Estimated context usage: " + currentContextUsagePercent + "% of ~" + CONTEXT_BUDGET_TOKENS + " tokens.");
         }
     }
 
@@ -2388,6 +2712,14 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
     private void refreshAttachmentStrip() {
         if (attachmentCardsPanel == null) return;
         attachmentCardsPanel.removeAll();
+        if (attachmentCountLabel != null) {
+            if (pendingAttachments.isEmpty()) {
+                attachmentCountLabel.setVisible(false);
+            } else {
+                attachmentCountLabel.setText(String.valueOf(pendingAttachments.size()));
+                attachmentCountLabel.setVisible(true);
+            }
+        }
         if (pendingAttachments.isEmpty()) {
             if (attachmentHintLabel != null) {
                 attachmentHintLabel.setText("No files attached");
