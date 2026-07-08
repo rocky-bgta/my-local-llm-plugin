@@ -17,6 +17,8 @@ import plugin.llm.PromptBuilder;
 import plugin.rag.ContextCollector;
 import plugin.rag.RetrievalResult;
 import plugin.memory.SkillMemory;
+import plugin.dependency.DependencyManager;
+import plugin.retry.RetryContextEngine;
 import plugin.testing.AutoFixLoop;
 import plugin.tool.GitTool;
 import plugin.util.AttachmentUtil;
@@ -78,6 +80,25 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
     // When true, a successful compile after a test-fix immediately re-runs the tests
     private boolean inTestFixLoop          = false;
     private String  testFixName            = null;
+    // Attachments and target file of the current task — used to progressively
+    // enrich retry prompts (RetryContextEngine) without user involvement
+    private List<AttachmentData> activeTaskAttachments = List.of();
+    private String  activeTargetSourcePath = "";
+    // One-shot pre-seed for flows that target a file without attaching it
+    // (e.g. right-click "Write Unit Test"); consumed by the next sendMessage
+    private String  pendingTargetSourcePath = "";
+    // Missing-dependency auto-fixes are tracked separately from LLM fix attempts
+    private int     dependencyFixAttempts  = 0;
+    private static final int MAX_DEPENDENCY_FIX_ATTEMPTS = 2;
+    private int     importFixAttempts      = 0;
+    private static final int MAX_IMPORT_FIX_ATTEMPTS = 2;
+    private int     visibilityFixAttempts  = 0;
+    private static final int MAX_VISIBILITY_FIX_ATTEMPTS = 2;
+    // 7B models occasionally answer large fix prompts (retry context level 3+) with prose
+    // and no file-op tag; one strict re-ask per fix attempt recovers without wasting the attempt
+    private boolean awaitingFixFileOps     = false;
+    private int     noFileOpReminderRetries = 0;
+    private static final int MAX_NO_FILE_OP_REMINDERS = 1;
 
     // Chat display
     private JTextPane      chatPane;
@@ -112,6 +133,13 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
     private int streamScanOffset = 0;
     private final Set<String> streamWrittenPaths = new HashSet<>();
     private AgentTask.TaskType currentTaskType = AgentTask.TaskType.GENERAL;
+
+    // LLM server state sync — periodic poll; changes are announced in the chat
+    private final Timer   llmSyncTimer;
+    private volatile String llmStateText = "";
+    private String  lastAnnouncedLlmState = "";
+    private volatile boolean llmSyncInFlight = false;
+    private static final int LLM_SYNC_INTERVAL_MS = 15_000;
 
     // Streaming state (all accessed on EDT only)
     private final Timer         blinkTimer;
@@ -159,6 +187,10 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
         blinkTimer.setRepeats(true);
         statusPulseTimer = new Timer(450, e -> toggleStatusPulse());
         statusPulseTimer.setRepeats(true);
+        llmSyncTimer = new Timer(LLM_SYNC_INTERVAL_MS, e -> syncLlmState());
+        llmSyncTimer.setRepeats(true);
+        llmSyncTimer.setInitialDelay(2_000);
+        llmSyncTimer.start();
 
         root = new JPanel(new BorderLayout());
         root.add(buildToolbar(),  BorderLayout.NORTH);
@@ -1172,10 +1204,19 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
         newlyCreatedFiles.clear();
         clearGeneratedTestSnapshots();
         buildFixAttempts       = 0;
+        dependencyFixAttempts  = 0;
+        importFixAttempts      = 0;
         lastCompileFingerprint = "";
         lastTestFingerprint    = "";
         inTestFixLoop          = false;
         testFixName            = null;
+        awaitingFixFileOps     = false;
+        noFileOpReminderRetries = 0;
+        visibilityFixAttempts  = 0;
+        activeTaskAttachments  = attachments.isEmpty() ? List.of() : List.copyOf(attachments);
+        String attachedSourcePath = primaryAttachedSourcePath(attachments);
+        activeTargetSourcePath  = !attachedSourcePath.isBlank() ? attachedSourcePath : pendingTargetSourcePath;
+        pendingTargetSourcePath = "";
 
         PluginSettings s  = PluginSettings.getInstance();
         String model      = s.getModel();
@@ -1199,6 +1240,12 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
 
         // Auto-switch to EDITING for tasks that require file changes
         AgentTask.TaskType detectedType = new PlannerAgent().detectTaskType(text);
+        // "this file" prompts: the attached source file IS the retrieval target
+        if (detectedType == AgentTask.TaskType.GENERATE_TESTS && !activeTargetSourcePath.isBlank()) {
+            String fileName = activeTargetSourcePath.substring(activeTargetSourcePath.lastIndexOf('/') + 1);
+            int dot = fileName.lastIndexOf('.');
+            forcedTargetSymbol = dot > 0 ? fileName.substring(0, dot) : fileName;
+        }
         boolean patchAttachment = AttachmentUtil.containsPatchAttachment(attachments);
         boolean jiraAttachment = AttachmentUtil.containsJiraTicketAttachment(attachments);
         boolean angularIntent = AttachmentUtil.containsAngularBuildIntent(text);
@@ -1297,6 +1344,14 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
         appendUserMessage(text);
         if (!attachments.isEmpty()) {
             String attachmentBlock = AttachmentUtil.buildPromptBlock(attachments);
+            if (detectedType == AgentTask.TaskType.GENERATE_TESTS) {
+                String expectedTestPath = expectedTestPathFromAttachments(attachments);
+                if (!expectedTestPath.isBlank()) {
+                    attachmentBlock += "\n\nRequired test file location: `" + expectedTestPath + "`.\n" +
+                            "Write the test with exactly one tag: <CREATE_FILE path=\"" + expectedTestPath +
+                            "\">...full content...</CREATE_FILE> (use <MODIFY_FILE> if the file already exists).";
+                }
+            }
             if (!attachmentBlock.isBlank()) {
                 history.add(new ChatMessage("user", attachmentBlock));
             }
@@ -1352,7 +1407,31 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
                 streamScanOffset = 0;
                 streamWrittenPaths.clear();
                 currentTaskType = taskType;
-                new LocalLLMClient(endpoint).streamChat(model, finalSnapshot, attachments,
+                LocalLLMClient client = new LocalLLMClient(endpoint);
+                LocalLLMClient.ServerState state = client.checkState();
+                applyLlmState(state, model);
+                if (!state.reachable()) {
+                    SwingUtilities.invokeLater(() -> {
+                        finalizeAssistantMessage();
+                        appendSystemMessage("⚠ LLM server is unreachable at " + endpoint
+                                + " (" + state.error() + "). Start LM Studio/Ollama, then resend.");
+                        refreshTelemetry("Idle", finalSnapshot);
+                        setLoading(false);
+                    });
+                    return;
+                }
+                if (!state.hasModel(model)) {
+                    SwingUtilities.invokeLater(() -> {
+                        finalizeAssistantMessage();
+                        appendSystemMessage("⚠ Model \"" + model + "\" is not loaded on the server. Loaded models: "
+                                + (state.models().isEmpty() ? "none" : String.join(", ", state.models()))
+                                + ". Load the model (or pick a loaded one), then resend.");
+                        refreshTelemetry("Idle", finalSnapshot);
+                        setLoading(false);
+                    });
+                    return;
+                }
+                client.streamChat(model, finalSnapshot, attachments,
                         token -> {
                             if (stopRequested) throw new RuntimeException("STREAM_INTERRUPTED");
                             if (!panelDisposed) {
@@ -1392,6 +1471,24 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
                                 responseLower.contains("<delete_folder"));
                         boolean hasTests = fullResponse.contains("<RUN_TESTS") || fullResponse.contains("<CHECK_COMPILATION");
                         boolean hasCustomCommand = fullResponse.contains("<EXECUTE_COMMAND");
+
+                        if (awaitingFixFileOps) {
+                            if (hasFileOps) {
+                                awaitingFixFileOps = false;
+                            } else if (noFileOpReminderRetries < MAX_NO_FILE_OP_REMINDERS) {
+                                noFileOpReminderRetries++;
+                                recordMistakes(java.util.List.of("fix-response-missing-file-op"));
+                                appendSystemMessage("⚠ Fix response contained no file operation tag — re-asking with a strict tag reminder (attempt not consumed)…");
+                                history.add(new ChatMessage("user", ChatPanelSupport.strictFileOpReminder()));
+                                beginAssistantMessage();
+                                blinkTimer.start();
+                                streamAndHandle(model, endpoint, null, false, taskType, attachments);
+                                return;
+                            } else {
+                                awaitingFixFileOps = false;
+                                appendSystemMessage("⚠ Model returned no file operation tag even after a strict reminder — this fix attempt produced no changes.");
+                            }
+                        }
 
                         if (ChatPanelSupport.isProjectStructureIntent(userText)
                                 && (ChatPanelSupport.isNonActionableModelResponse(fullResponse)
@@ -1483,10 +1580,13 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
                                 appendSystemMessage("No test file was written. Please resend a complete XML tag for the matching *Test file.");
                                 return;
                             }
+                            reportGeneratedTestLocation(taskType, opResult);
+                            String generatedTestName = ChatPanelSupport.testClassNameFromPaths(opResult.appliedFiles);
                             if (opResult.runTests) {
                                 appendSystemMessage("File operations applied. Running build check before tests…");
                                 refreshTelemetry("Debugging", finalSnapshot);
-                                scheduleBuildCheck(model, endpoint, taskType, true, opResult.testName);
+                                scheduleBuildCheck(model, endpoint, taskType, true,
+                                        opResult.testName != null ? opResult.testName : generatedTestName);
                             } else if (opResult.checkCompilation) {
                                 appendSystemMessage("Compilation check requested. Running build…");
                                 refreshTelemetry("Debugging", finalSnapshot);
@@ -1524,7 +1624,10 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
                             } else if (hasFileOps) {
                                 appendSystemMessage("File operations applied. Running build check…");
                                 refreshTelemetry("Debugging", finalSnapshot);
-                                scheduleBuildCheck(model, endpoint, taskType, taskType == AgentTask.TaskType.GENERATE_TESTS, null);
+                                // For generated tests, run ONLY the new test class — a full-suite
+                                // run would pollute the fix loop with unrelated failures
+                                scheduleBuildCheck(model, endpoint, taskType,
+                                        taskType == AgentTask.TaskType.GENERATE_TESTS, generatedTestName);
                             }
 
                             if (fullResponse.contains("<GIT_ADD_NEW")) {
@@ -1840,6 +1943,29 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
         return opResult.appliedFiles.stream().anyMatch(plugin.util.LanguageSupportUtil::isTestFile);
     }
 
+    /**
+     * Confirms in the chat whether the generated test landed at the expected
+     * conventional location derived from the attached source file.
+     */
+    private void reportGeneratedTestLocation(AgentTask.TaskType taskType, FileOperationUtil.FileOpResult opResult) {
+        if (taskType != AgentTask.TaskType.GENERATE_TESTS
+                || opResult == null || opResult.appliedFiles == null) {
+            return;
+        }
+        String appliedTest = opResult.appliedFiles.stream()
+                .filter(plugin.util.LanguageSupportUtil::isTestFile)
+                .findFirst()
+                .map(p -> p.replace("\\", "/"))
+                .orElse(null);
+        if (appliedTest == null) return;
+        String expected = expectedTestPathFromAttachments(activeTaskAttachments);
+        if (expected.isBlank() || expected.equals(appliedTest)) {
+            appendSystemMessage("✓ Test file written at " + appliedTest);
+        } else {
+            appendSystemMessage("⚠ Test file written at " + appliedTest + " (expected " + expected + ")");
+        }
+    }
+
     private String buildGeneratedTestFileCorrection(String userText, List<AttachmentData> attachments) {
         String expectedPath = expectedTestPathFromAttachments(attachments);
         String targetLine = expectedPath == null || expectedPath.isBlank()
@@ -1876,6 +2002,14 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
     }
 
     private String expectedTestPathFromAttachments(List<AttachmentData> attachments) {
+        String sourcePath = primaryAttachedSourcePath(attachments);
+        return sourcePath.isBlank() ? "" : plugin.util.LanguageSupportUtil.suggestedTestPath(sourcePath);
+    }
+
+    /**
+     * Project-relative path of the first attached non-test source file, or "".
+     */
+    private String primaryAttachedSourcePath(List<AttachmentData> attachments) {
         if (attachments == null || attachments.isEmpty()) return "";
         Path basePath = project.getBasePath() == null ? null : Paths.get(project.getBasePath()).toAbsolutePath().normalize();
         for (AttachmentData attachment : attachments) {
@@ -1891,7 +2025,22 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
             }
             if (plugin.util.LanguageSupportUtil.isSourceFile(sourcePath)
                     && !plugin.util.LanguageSupportUtil.isTestFile(sourcePath)) {
-                return plugin.util.LanguageSupportUtil.suggestedTestPath(sourcePath);
+                return sourcePath;
+            }
+        }
+        return "";
+    }
+
+    /**
+     * Text content of the first attached non-test source file, or "".
+     */
+    private String attachedTargetContent() {
+        for (AttachmentData attachment : activeTaskAttachments) {
+            if (attachment == null || !attachment.hasTextContent()) continue;
+            String name = attachment.displayName() == null ? "" : attachment.displayName();
+            if (plugin.util.LanguageSupportUtil.isSourceFile(name)
+                    && !plugin.util.LanguageSupportUtil.isTestFile(name)) {
+                return attachment.textContent();
             }
         }
         return "";
@@ -1910,6 +2059,23 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
                         ? java.util.Collections.emptyList()
                         : ChatPanelSupport.extractBrokenFilePaths(result.output());
                 String sourceContext = result.success() ? "" : ChatPanelSupport.scanProjectForErrorContext(project, result.output(), brokenPaths);
+                // Plugin-side dependency resolution: add missing libraries to the
+                // build file before spending an LLM fix attempt
+                String depFixSummary = (!result.success() && dependencyFixAttempts < MAX_DEPENDENCY_FIX_ATTEMPTS)
+                        ? DependencyManager.attemptAutoResolve(project.getBasePath(), result.output())
+                        : "";
+                // Missing imports in generated code are fixed deterministically —
+                // no LLM attempt is spent on them
+                String importFixSummary = (!result.success() && importFixAttempts < MAX_IMPORT_FIX_ATTEMPTS)
+                        ? plugin.testing.ImportFixer.attemptAutoFix(project.getBasePath(), result.output())
+                        : "";
+                // Private constant references are replaced with their literal values
+                String visibilityFixSummary = (!result.success() && visibilityFixAttempts < MAX_VISIBILITY_FIX_ATTEMPTS)
+                        ? plugin.testing.VisibilityFixer.attemptAutoFix(project.getBasePath(), result.output())
+                        : "";
+                // Progressive context expansion — each retry sends MORE information
+                String retryContext = result.success() ? "" : RetryContextEngine.buildRetryContext(
+                        project.getBasePath(), buildFixAttempts + 1, activeTargetSourcePath, attachedTargetContent());
                 SwingUtilities.invokeLater(() -> {
                     if (result.success()) {
                         appendSystemMessage("✓ Build successful.");
@@ -1928,6 +2094,21 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
                             }
                             setLoading(false);
                         }
+                    } else if (!depFixSummary.isBlank() || !importFixSummary.isBlank() || !visibilityFixSummary.isBlank()) {
+                        if (!importFixSummary.isBlank()) {
+                            importFixAttempts++;
+                            appendSystemMessage("🧩 " + importFixSummary);
+                        }
+                        if (!visibilityFixSummary.isBlank()) {
+                            visibilityFixAttempts++;
+                            appendSystemMessage("🔒 " + visibilityFixSummary);
+                        }
+                        if (!depFixSummary.isBlank()) {
+                            dependencyFixAttempts++;
+                            appendSystemMessage("📦 " + depFixSummary);
+                        }
+                        appendSystemMessage("Rebuilding after automatic plugin-side fixes…");
+                        scheduleBuildCheck(model, endpoint, taskType, runTestsAfterBuild, testNameAfterBuild);
                     } else if (buildFixAttempts < AutoFixLoop.MAX_COMPILE_ATTEMPTS) {
                         buildFixAttempts++;
                         String errors = result.output();
@@ -1945,14 +2126,20 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
 
                         String fixInstruction = PromptBuilder.buildCompileFixPrompt(
                                 errors, pathHint, sourceContext, projectType, buildFixAttempts, sameError);
+                        if (!retryContext.isBlank()) {
+                            fixInstruction += "\n\n" + retryContext;
+                        }
 
                         appendSystemMessage("⚠ Build errors — asking LLM to fix " +
                                 "(attempt " + buildFixAttempts + "/" +
-                                AutoFixLoop.MAX_COMPILE_ATTEMPTS + ")…");
+                                AutoFixLoop.MAX_COMPILE_ATTEMPTS + ", context level " +
+                                Math.min(buildFixAttempts, RetryContextEngine.MAX_LEVEL) + ")…");
+                        awaitingFixFileOps = true;
+                        noFileOpReminderRetries = 0;
                         history.add(new ChatMessage("user", fixInstruction));
                         beginAssistantMessage();
                         blinkTimer.start();
-                        streamAndHandle(model, endpoint, null, false, taskType);
+                        streamAndHandle(model, endpoint, null, false, taskType, activeTaskAttachments);
                     } else {
                         String errors = result.output();
                         if (errors.length() > 3000) errors = errors.substring(0, 3000) + "\n[...truncated]";
@@ -1978,6 +2165,21 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
                         ? java.util.Collections.emptyList()
                         : ChatPanelSupport.extractBrokenFilePaths(result.output());
                 String sourceContext = result.success() ? "" : ChatPanelSupport.scanProjectForErrorContext(project, result.output(), brokenPaths);
+                // Runtime failures (NoClassDefFoundError etc.) can also mean a missing dependency
+                String depFixSummary = (!result.success() && dependencyFixAttempts < MAX_DEPENDENCY_FIX_ATTEMPTS)
+                        ? DependencyManager.attemptAutoResolve(project.getBasePath(), result.output())
+                        : "";
+                // Test-compile failures from missing imports are fixed deterministically
+                String importFixSummary = (!result.success() && importFixAttempts < MAX_IMPORT_FIX_ATTEMPTS)
+                        ? plugin.testing.ImportFixer.attemptAutoFix(project.getBasePath(), result.output())
+                        : "";
+                // Private constant references are replaced with their literal values
+                String visibilityFixSummary = (!result.success() && visibilityFixAttempts < MAX_VISIBILITY_FIX_ATTEMPTS)
+                        ? plugin.testing.VisibilityFixer.attemptAutoFix(project.getBasePath(), result.output())
+                        : "";
+                // Progressive context expansion — each retry sends MORE information
+                String retryContext = result.success() ? "" : RetryContextEngine.buildRetryContext(
+                        project.getBasePath(), buildFixAttempts + 1, activeTargetSourcePath, attachedTargetContent());
                 SwingUtilities.invokeLater(() -> {
                     if (result.success()) {
                         appendSystemMessage("✓ Tests passed successfully.");
@@ -2003,7 +2205,22 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
                         if (!rawOutput.isBlank()) output.append("\n").append(rawOutput);
                         appendSystemMessage(ChatPanelSupport.stripProjectStructureWrappers(output.toString()));
 
-                        if (buildFixAttempts < AutoFixLoop.MAX_TEST_ATTEMPTS) {
+                        if (!depFixSummary.isBlank() || !importFixSummary.isBlank() || !visibilityFixSummary.isBlank()) {
+                            if (!importFixSummary.isBlank()) {
+                                importFixAttempts++;
+                                appendSystemMessage("🧩 " + importFixSummary);
+                            }
+                            if (!visibilityFixSummary.isBlank()) {
+                                visibilityFixAttempts++;
+                                appendSystemMessage("🔒 " + visibilityFixSummary);
+                            }
+                            if (!depFixSummary.isBlank()) {
+                                dependencyFixAttempts++;
+                                appendSystemMessage("📦 " + depFixSummary);
+                            }
+                            appendSystemMessage("Re-running tests after automatic plugin-side fixes…");
+                            scheduleTestRun(model, endpoint, testName, taskType);
+                        } else if (buildFixAttempts < AutoFixLoop.MAX_TEST_ATTEMPTS) {
                             buildFixAttempts++;
                             String errors = rawOutput;
 
@@ -2020,6 +2237,9 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
 
                             String fixInstruction = PromptBuilder.buildTestFixPrompt(
                                     errors, pathHint, sourceContext, projectType, buildFixAttempts, sameError);
+                            if (!retryContext.isBlank()) {
+                                fixInstruction += "\n\n" + retryContext;
+                            }
 
                             // Set flag so that after the LLM writes a fix and it compiles,
                             // scheduleBuildCheck will re-run the tests automatically
@@ -2028,11 +2248,14 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
 
                             appendSystemMessage("⚠ Test failures — asking LLM to fix " +
                                     "(attempt " + buildFixAttempts + "/" +
-                                    AutoFixLoop.MAX_TEST_ATTEMPTS + ")…");
+                                    AutoFixLoop.MAX_TEST_ATTEMPTS + ", context level " +
+                                    Math.min(buildFixAttempts, RetryContextEngine.MAX_LEVEL) + ")…");
+                            awaitingFixFileOps = true;
+                            noFileOpReminderRetries = 0;
                             history.add(new ChatMessage("user", fixInstruction));
                             beginAssistantMessage();
                             blinkTimer.start();
-                            streamAndHandle(model, endpoint, null, false, taskType);
+                            streamAndHandle(model, endpoint, null, false, taskType, activeTaskAttachments);
                         } else {
                             inTestFixLoop = false;
                             appendSystemMessage("❌ Tests still failing after " +
@@ -2349,6 +2572,7 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
         // that leaves the LLM mid-generation and truncates file output.
         blinkTimer.stop();
         statusPulseTimer.stop();
+        llmSyncTimer.stop();
         if (contextCollector != null) {
             contextCollector = null;
         }
@@ -2362,9 +2586,47 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
 
     private void refreshWorkspaceStatus() {
         if (workspaceStatusLabel == null) return;
-        workspaceStatusLabel.setText(ChatPanelSupport.formatWorkspaceStatus(
-                workspaceProjectTypeLabel, estimatedInputTokens, estimatedOutputTokens));
+        String text = ChatPanelSupport.formatWorkspaceStatus(
+                workspaceProjectTypeLabel, estimatedInputTokens, estimatedOutputTokens);
+        if (!llmStateText.isBlank()) {
+            text += "  •  " + llmStateText;
+        }
+        workspaceStatusLabel.setText(text);
         workspaceStatusLabel.setToolTipText(workspaceStatusLabel.getText());
+    }
+
+    /** EDT timer callback — polls the LLM server state off-EDT. */
+    private void syncLlmState() {
+        if (panelDisposed || llmSyncInFlight) return;
+        PluginSettings s = PluginSettings.getInstance();
+        String endpoint = s.getEndpoint();
+        String model    = s.getModel();
+        if (endpoint == null || endpoint.isBlank()) return;
+        llmSyncInFlight = true;
+        daemon(() -> {
+            try {
+                applyLlmState(new LocalLLMClient(endpoint).checkState(), model);
+            } finally {
+                llmSyncInFlight = false;
+            }
+        });
+    }
+
+    /** Safe from any thread. Announces state changes in the chat; silent while state is stable. */
+    private void applyLlmState(LocalLLMClient.ServerState state, String model) {
+        String summary = ChatPanelSupport.llmStateSummary(state.reachable(), state.models(), model);
+        llmStateText = summary;
+        if (panelDisposed) return;
+        SwingUtilities.invokeLater(() -> {
+            if (!summary.equals(lastAnnouncedLlmState)) {
+                boolean firstHealthySync = lastAnnouncedLlmState.isEmpty() && summary.startsWith("LLM ready");
+                if (!firstHealthySync) {
+                    appendSystemMessage("🔄 " + summary);
+                }
+                lastAnnouncedLlmState = summary;
+            }
+            refreshWorkspaceStatus();
+        });
     }
 
     private void refreshTelemetry(String activity, List<ChatMessage> snapshot) {
@@ -2991,6 +3253,7 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
             if (suggestedTestPath.isBlank()) {
                 suggestedTestPath = "src/test/java/" + className + "Test.java";
             }
+            pendingTargetSourcePath = relativeSourcePath == null ? "" : relativeSourcePath;
 
             String sourceSnippet = readSourceSnippet(sourceFilePath);
             promptArea.setText("Generate a compile-ready test for " + className + ". "

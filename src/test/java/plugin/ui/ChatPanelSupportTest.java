@@ -260,6 +260,21 @@ public class ChatPanelSupportTest {
     }
 
     @Test
+    void extractsTestClassNameFromAppliedFiles() {
+        assertEquals("FooTest", ChatPanelSupport.testClassNameFromPaths(List.of(
+                "src/main/java/com/example/Foo.java",
+                "src\\test\\java\\com\\example\\FooTest.java"
+        )));
+        assertEquals(null, ChatPanelSupport.testClassNameFromPaths(List.of(
+                "src/main/java/com/example/Foo.java"
+        )));
+        assertEquals(null, ChatPanelSupport.testClassNameFromPaths(List.of(
+                "src/test/resources/fixture.json"
+        )));
+        assertEquals(null, ChatPanelSupport.testClassNameFromPaths(null));
+    }
+
+    @Test
     void calculatesContextUsagePercent() {
         List<ChatMessage> history = List.of(
                 new ChatMessage("system", "system prompt"),
@@ -268,5 +283,40 @@ public class ChatPanelSupportTest {
 
         assertEquals(0, ChatPanelSupport.contextUsagePercent(history, 0));
         assertTrue(ChatPanelSupport.contextUsagePercent(history, 100) > 0);
+    }
+
+    @Test
+    void strictFileOpReminderDemandsSingleUppercaseTag() {
+        String reminder = ChatPanelSupport.strictFileOpReminder();
+        assertTrue(reminder.contains("RESPONSE REJECTED"));
+        assertTrue(reminder.contains("<MODIFY_FILE path="));
+        assertTrue(reminder.contains("EXACTLY ONE tag"));
+        assertFalse(reminder.contains("<modify_file"));
+    }
+
+    @Test
+    void llmStateSummaryReportsOffline() {
+        assertEquals("LLM offline — server unreachable",
+                ChatPanelSupport.llmStateSummary(false, List.of("qwen"), "qwen"));
+    }
+
+    @Test
+    void llmStateSummaryReportsNoModelLoaded() {
+        assertEquals("LLM online — no model loaded",
+                ChatPanelSupport.llmStateSummary(true, List.of(), "qwen"));
+        assertEquals("LLM online — no model loaded",
+                ChatPanelSupport.llmStateSummary(true, null, "qwen"));
+    }
+
+    @Test
+    void llmStateSummaryReportsSelectedModelNotLoaded() {
+        assertEquals("LLM online — \"llama3\" not loaded (loaded: qwen/qwen2.5-vl-7b)",
+                ChatPanelSupport.llmStateSummary(true, List.of("qwen/qwen2.5-vl-7b"), "llama3"));
+    }
+
+    @Test
+    void llmStateSummaryReportsReadyIgnoringCase() {
+        assertEquals("LLM ready — Qwen/Qwen2.5-VL-7B",
+                ChatPanelSupport.llmStateSummary(true, List.of("qwen/qwen2.5-vl-7b"), "Qwen/Qwen2.5-VL-7B"));
     }
 }

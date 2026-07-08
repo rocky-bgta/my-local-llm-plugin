@@ -14,9 +14,20 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
+import java.util.concurrent.Flow;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 
 public class LocalLLMClient {
+
+    // Package-private mutable so tests can shrink them.
+    static long firstDataTimeoutSeconds = 120;
+    static long idleTimeoutSeconds = 60;
+    static long modelsTimeoutSeconds = 5;
 
     private final String baseUrl;
     final HttpClient http;
@@ -28,10 +39,29 @@ public class LocalLLMClient {
                 .build();
     }
 
+    /** Snapshot of the local LLM server's state, from GET /v1/models. */
+    public record ServerState(boolean reachable, List<String> models, String error) {
+        public boolean hasModel(String model) {
+            if (model == null || model.isBlank()) return false;
+            return models.stream().anyMatch(m -> m.equalsIgnoreCase(model));
+        }
+    }
+
+    /** Never throws — reports unreachability via the returned state. */
+    public ServerState checkState() {
+        try {
+            return new ServerState(true, fetchModels(), "");
+        } catch (Exception e) {
+            String msg = e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage();
+            return new ServerState(false, List.of(), msg);
+        }
+    }
+
     public List<String> fetchModels() throws Exception {
         HttpRequest req = HttpRequest.newBuilder()
                 .uri(URI.create(baseUrl + "/v1/models"))
                 .header("Accept", "application/json")
+                .timeout(Duration.ofSeconds(modelsTimeoutSeconds))
                 .GET()
                 .build();
 
@@ -48,42 +78,7 @@ public class LocalLLMClient {
     // Blocks until the server sends [DONE]. onToken is called for each text chunk.
     public void streamChat(String model, List<ChatMessage> messages,
                            Consumer<String> onToken) throws Exception {
-        JsonObject body = buildBody(model, messages, List.of());
-        byte[] bytes = body.toString().getBytes(StandardCharsets.UTF_8);
-
-        HttpRequest req = HttpRequest.newBuilder()
-                .uri(URI.create(baseUrl + "/v1/chat/completions"))
-                .header("Content-Type", "application/json")
-                .header("Accept",       "text/event-stream")
-                .POST(HttpRequest.BodyPublishers.ofByteArray(bytes))
-                .timeout(Duration.ofSeconds(300))
-                .build();
-
-        try {
-            var res = http.send(req, HttpResponse.BodyHandlers.ofLines());
-            res.body().forEach(line -> {
-                if (Thread.currentThread().isInterrupted()) {
-                    throw new RuntimeException("STREAM_INTERRUPTED");
-                }
-                if (!line.startsWith("data: ")) return;
-                String data = line.substring(6).trim();
-                if ("[DONE]".equals(data)) return;
-                try {
-                    JsonObject obj    = JsonParser.parseString(data).getAsJsonObject();
-                    JsonArray choices = obj.getAsJsonArray("choices");
-                    if (choices == null || choices.isEmpty()) return;
-                    JsonObject delta  = choices.get(0).getAsJsonObject().getAsJsonObject("delta");
-                    if (delta == null || !delta.has("content") || delta.get("content").isJsonNull()) return;
-                    String token      = delta.get("content").getAsString();
-                    if (!token.isEmpty()) onToken.accept(token);
-                } catch (Exception ignored) {}
-            });
-        } catch (java.io.IOException e) {
-            if (e.getCause() instanceof InterruptedException || Thread.currentThread().isInterrupted()) {
-                throw new InterruptedException("STOPPED_BY_USER");
-            }
-            throw e;
-        }
+        streamChat(model, messages, List.of(), onToken);
     }
 
     public void streamChat(String model, List<ChatMessage> messages,
@@ -97,34 +92,96 @@ public class LocalLLMClient {
                 .header("Content-Type", "application/json")
                 .header("Accept",       "text/event-stream")
                 .POST(HttpRequest.BodyPublishers.ofByteArray(bytes))
-                .timeout(Duration.ofSeconds(300))
                 .build();
 
+        LineSubscriber subscriber = new LineSubscriber();
+        CompletableFuture<HttpResponse<Void>> future =
+                http.sendAsync(req, info -> {
+                    subscriber.statusCode = info.statusCode();
+                    return HttpResponse.BodySubscribers.fromLineSubscriber(subscriber);
+                });
+        future.whenComplete((r, t) -> { if (t != null) subscriber.queue.offer(t); });
+
         try {
-            var res = http.send(req, HttpResponse.BodyHandlers.ofLines());
-            res.body().forEach(line -> {
+            boolean gotFirstData = false;
+            StringBuilder errorBody = new StringBuilder();
+            while (true) {
                 if (Thread.currentThread().isInterrupted()) {
-                    // We throw a dedicated exception to be caught in ChatPanel
-                    throw new RuntimeException("STREAM_INTERRUPTED");
+                    throw new InterruptedException("STOPPED_BY_USER");
                 }
-                if (!line.startsWith("data: ")) return;
+                long timeout = gotFirstData ? idleTimeoutSeconds : firstDataTimeoutSeconds;
+                Object item = subscriber.queue.poll(timeout, TimeUnit.SECONDS);
+                if (item == null) {
+                    throw new java.io.IOException(gotFirstData
+                            ? "LLM stream stalled: no data for " + idleTimeoutSeconds
+                              + "s mid-response. The model may have crashed or been unloaded."
+                            : "LLM did not start responding within " + firstDataTimeoutSeconds
+                              + "s. The server is reachable but silent — check that the model is loaded and not stuck.");
+                }
+                if (item == LineSubscriber.END) break;
+                if (item instanceof Throwable t) {
+                    throw t instanceof Exception ex ? ex : new RuntimeException(t);
+                }
+                String line = (String) item;
+                gotFirstData = true;
+                if (subscriber.statusCode != 200) {
+                    errorBody.append(line).append('\n');
+                    continue;
+                }
+                if (!line.startsWith("data: ")) continue;
                 String data = line.substring(6).trim();
-                if ("[DONE]".equals(data)) return;
+                if ("[DONE]".equals(data)) continue;
                 try {
                     JsonObject obj    = JsonParser.parseString(data).getAsJsonObject();
                     JsonArray choices = obj.getAsJsonArray("choices");
-                    if (choices == null || choices.isEmpty()) return;
+                    if (choices == null || choices.isEmpty()) continue;
                     JsonObject delta  = choices.get(0).getAsJsonObject().getAsJsonObject("delta");
-                    if (delta == null || !delta.has("content") || delta.get("content").isJsonNull()) return;
+                    if (delta == null || !delta.has("content") || delta.get("content").isJsonNull()) continue;
                     String token      = delta.get("content").getAsString();
                     if (!token.isEmpty()) onToken.accept(token);
                 } catch (Exception ignored) {}
-            });
+            }
+            if (subscriber.statusCode != 200 && subscriber.statusCode != 0) {
+                throw new java.io.IOException("LLM server returned HTTP " + subscriber.statusCode
+                        + (errorBody.isEmpty() ? "" : ": " + errorBody.toString().strip()));
+            }
+        } catch (CompletionException e) {
+            Throwable cause = e.getCause() == null ? e : e.getCause();
+            if (cause instanceof InterruptedException || Thread.currentThread().isInterrupted()) {
+                throw new InterruptedException("STOPPED_BY_USER");
+            }
+            throw cause instanceof Exception ex ? ex : new RuntimeException(cause);
         } catch (java.io.IOException e) {
             if (e.getCause() instanceof InterruptedException || Thread.currentThread().isInterrupted()) {
                 throw new InterruptedException("STOPPED_BY_USER");
             }
             throw e;
+        } finally {
+            subscriber.cancel();
+            future.cancel(true);
+        }
+    }
+
+    /** Forwards SSE lines to a queue so the caller can enforce watchdog timeouts. */
+    private static final class LineSubscriber implements Flow.Subscriber<String> {
+        static final Object END = new Object();
+        final BlockingQueue<Object> queue = new LinkedBlockingQueue<>();
+        volatile int statusCode;
+        private volatile Flow.Subscription subscription;
+
+        @Override public void onSubscribe(Flow.Subscription s) {
+            subscription = s;
+            s.request(Long.MAX_VALUE);
+        }
+        @Override public void onNext(String line)      { queue.offer(line); }
+        @Override public void onError(Throwable t)     { queue.offer(t); }
+        @Override public void onComplete()             { queue.offer(END); }
+
+        void cancel() {
+            Flow.Subscription s = subscription;
+            if (s != null) {
+                try { s.cancel(); } catch (Exception ignored) {}
+            }
         }
     }
 

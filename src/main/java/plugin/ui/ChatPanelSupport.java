@@ -141,6 +141,27 @@ final class ChatPanelSupport {
         return context.toString();
     }
 
+    /**
+     * Derives the JVM test class simple name from the first applied test file,
+     * so the runner can execute only the generated test instead of the full suite.
+     */
+    static String testClassNameFromPaths(List<String> appliedFiles) {
+        if (appliedFiles == null) return null;
+        for (String path : appliedFiles) {
+            if (path == null) continue;
+            String normalized = path.replace("\\", "/");
+            if (!LanguageSupportUtil.isTestFile(normalized)) continue;
+            String fileName = normalized.substring(normalized.lastIndexOf('/') + 1);
+            int dot = fileName.lastIndexOf('.');
+            if (dot <= 0) continue;
+            String ext = fileName.substring(dot);
+            if (ext.equals(".java") || ext.equals(".kt") || ext.equals(".scala") || ext.equals(".groovy")) {
+                return fileName.substring(0, dot);
+            }
+        }
+        return null;
+    }
+
     static boolean isFileOpIntent(String userText) {
         if (userText == null) return false;
         String lower = userText.toLowerCase();
@@ -654,6 +675,30 @@ final class ChatPanelSupport {
                 + " | Tokens in/out: ~" + String.format("%,d", Math.max(0, inputTokens))
                 + " / ~" + String.format("%,d", Math.max(0, outputTokens))
                 + " (est.)";
+    }
+
+    static String strictFileOpReminder() {
+        return "RESPONSE REJECTED: your previous reply contained NO file operation tag, so nothing was applied "
+                + "and the failure is still unfixed.\n"
+                + "Do NOT explain, apologize, or describe the fix in prose.\n"
+                + "Reply with EXACTLY ONE tag containing the FULL corrected file, using the same path "
+                + "given in the previous fix instructions:\n"
+                + "<MODIFY_FILE path=\"src/test/java/.../YourTest.java\">\n"
+                + "...complete corrected file content...\n"
+                + "</MODIFY_FILE>\n"
+                + "Your entire response must be that single tag and nothing else.";
+    }
+
+    static String llmStateSummary(boolean reachable, List<String> models, String selectedModel) {
+        if (!reachable) return "LLM offline — server unreachable";
+        if (models == null || models.isEmpty()) return "LLM online — no model loaded";
+        String selected = selectedModel == null ? "" : selectedModel.trim();
+        boolean selectedLoaded = !selected.isEmpty()
+                && models.stream().anyMatch(m -> m != null && m.equalsIgnoreCase(selected));
+        if (!selectedLoaded) {
+            return "LLM online — \"" + selected + "\" not loaded (loaded: " + String.join(", ", models) + ")";
+        }
+        return "LLM ready — " + selected;
     }
 
     static String projectTypeLabel(Project project) {
