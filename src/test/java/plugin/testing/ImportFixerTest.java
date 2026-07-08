@@ -113,6 +113,52 @@ public class ImportFixerTest {
     }
 
     @Test
+    void fixCommonImportsInsertsMissingJavaUtilImportsPreBuild() throws IOException {
+        write("src/test/java/plugin/rag/RerankerTest.java", """
+                package plugin.rag;
+
+                import org.junit.jupiter.api.Test;
+
+                class RerankerTest {
+                    void t() {
+                        List<String> l = new ArrayList<>();
+                        Collections.sort(l);
+                        Arrays.stream(new String[]{"a"}).collect(Collectors.toList());
+                    }
+                }
+                """);
+
+        String summary = ImportFixer.fixCommonImports(projectDir.toString(),
+                "src/test/java/plugin/rag/RerankerTest.java");
+
+        assertTrue(summary.contains("Auto-fixed missing imports before build"));
+        String content = Files.readString(projectDir.resolve("src/test/java/plugin/rag/RerankerTest.java"));
+        assertTrue(content.contains("import java.util.List;"));
+        assertTrue(content.contains("import java.util.ArrayList;"));
+        assertTrue(content.contains("import java.util.Collections;"));
+        assertTrue(content.contains("import java.util.Arrays;"));
+        assertTrue(content.contains("import java.util.stream.Collectors;"));
+    }
+
+    @Test
+    void fixCommonImportsReturnsEmptyWhenNothingMissing() throws IOException {
+        write("src/test/java/plugin/rag/CleanTest.java", """
+                package plugin.rag;
+
+                import java.util.List;
+
+                class CleanTest { List<String> l; }
+                """);
+
+        assertEquals("", ImportFixer.fixCommonImports(projectDir.toString(),
+                "src/test/java/plugin/rag/CleanTest.java"));
+        assertEquals("", ImportFixer.fixCommonImports(projectDir.toString(),
+                "src/test/java/plugin/rag/MissingTest.java"));
+        assertEquals("", ImportFixer.fixCommonImports(null, "x.java"));
+        assertEquals("", ImportFixer.fixCommonImports(projectDir.toString(), ""));
+    }
+
+    @Test
     void skipsSamePackageSymbols() throws IOException {
         write("src/main/java/plugin/memory/Sibling.java", "package plugin.memory;\npublic class Sibling {}");
         Path test = write("src/test/java/plugin/memory/BarTest.java",

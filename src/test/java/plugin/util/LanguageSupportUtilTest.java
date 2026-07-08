@@ -36,4 +36,28 @@ public class LanguageSupportUtilTest {
         assertEquals("src/components/Button.test.ts",
                 LanguageSupportUtil.suggestedTestPath("src/components/Button.ts"));
     }
+
+    @Test
+    void suggestedTestPathHandlesMultiModuleMavenJavaPaths() {
+        // Arrange — file is inside a sub-module, not at the project root
+        String sourceInModule = "module-core/src/main/java/com/example/OrderService.java";
+
+        // Act
+        String testPath = LanguageSupportUtil.suggestedTestPath(sourceInModule);
+
+        // Assert
+        assertEquals("module-core/src/test/java/com/example/OrderServiceTest.java", testPath);
+    }
+
+    @Test
+    void suggestedTestPathHandlesMultiModuleMavenKotlinPaths() {
+        // Arrange
+        String sourceInModule = "module-api/src/main/kotlin/com/example/ApiClient.kt";
+
+        // Act
+        String testPath = LanguageSupportUtil.suggestedTestPath(sourceInModule);
+
+        // Assert
+        assertEquals("module-api/src/test/kotlin/com/example/ApiClientTest.kt", testPath);
+    }
 }

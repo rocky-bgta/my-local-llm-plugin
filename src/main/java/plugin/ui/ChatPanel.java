@@ -1359,6 +1359,19 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
                             "Write the test with exactly one tag: <CREATE_FILE path=\"" + expectedTestPath +
                             "\">...full content...</CREATE_FILE> (use <MODIFY_FILE> if the file already exists).";
                 }
+                // Inject comprehensive pre-test context (build file, existing conventions,
+                // constructor deps, imports, commands) so the LLM has everything before generating.
+                String basePath = project.getBasePath();
+                if (!activeTargetSourcePath.isBlank() && basePath != null) {
+                    try {
+                        java.nio.file.Path srcFile = Paths.get(basePath).resolve(activeTargetSourcePath);
+                        String testGenCtx = new plugin.testing.TestGenerator()
+                                .buildFileDropTestPrompt(srcFile, basePath);
+                        if (!testGenCtx.isBlank()) {
+                            attachmentBlock += "\n\n" + testGenCtx;
+                        }
+                    } catch (Exception ignored) {}
+                }
             }
             if (!attachmentBlock.isBlank()) {
                 history.add(new ChatMessage("user", attachmentBlock));
@@ -2083,8 +2096,9 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
     }
 
     /**
-     * Static pre-build scan of a just-written test file: private-member usage
-     * and missing imports are caught here so the correction names the exact
+     * Static pre-build scan of a just-written test file. Missing common imports
+     * are repaired on disk immediately (no LLM round trip); remaining defects —
+     * private-member usage — are returned so the correction names the exact
      * problem instead of waiting for raw compiler output.
      */
     private List<String> collectGeneratedTestViolations(FileOperationUtil.FileOpResult opResult) {
@@ -2097,6 +2111,10 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
         String basePath = project.getBasePath();
         if (testPath == null || basePath == null) return List.of();
         try {
+            String importFixSummary = plugin.testing.ImportFixer.fixCommonImports(basePath, testPath);
+            if (!importFixSummary.isBlank()) {
+                appendSystemMessage("🧩 " + importFixSummary);
+            }
             java.nio.file.Path base = Paths.get(basePath);
             String testContent = java.nio.file.Files.readString(base.resolve(testPath));
             String sourceContent = "";
@@ -2123,9 +2141,17 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
         violations.forEach(v -> sb.append("- ").append(v).append('\n'));
         sb.append("Rewrite the COMPLETE test file and fix every issue listed above.\n")
           .append("Test ONLY public methods and constructors from the source class. ")
-          .append("NEVER reference private methods, private constants, or private nested types.\n")
+          .append("NEVER reference private methods, private constants, or private nested types. ")
+          .append("Do NOT change production code visibility only for testing.\n")
+          .append("Identify the public method that internally uses each private member and verify the behavior through it.\n")
           .append("Include EVERY import the test needs (org.junit.jupiter.api and any java.util classes you use).\n")
-          .append("Resend the full corrected file as one tag: <MODIFY_FILE path=\"")
+          .append("Keep the AAA pattern (Arrange, Act, Assert) in every test method.\n");
+        List<String> publicApi = plugin.testing.PrivateAccessAdvisor.publicMethodSignatures(targetSourceContent());
+        if (!publicApi.isEmpty()) {
+            sb.append("Public API of the class under test — write tests ONLY against these:\n");
+            publicApi.forEach(m -> sb.append("- ").append(m).append('\n'));
+        }
+        sb.append("Resend the full corrected file as one tag: <MODIFY_FILE path=\"")
           .append(testPath)
           .append("\">complete content</MODIFY_FILE>. Output only the XML tag.");
         return sb.toString();
@@ -2188,6 +2214,25 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
     }
 
     /**
+     * Content of the class under test: the active target source file on disk,
+     * falling back to the attached source text.
+     */
+    private String targetSourceContent() {
+        String basePath = project.getBasePath();
+        if (basePath != null && activeTargetSourcePath != null && !activeTargetSourcePath.isBlank()) {
+            try {
+                java.nio.file.Path src = Paths.get(basePath).resolve(activeTargetSourcePath);
+                if (java.nio.file.Files.exists(src)) {
+                    return java.nio.file.Files.readString(src);
+                }
+            } catch (Exception ignored) {
+                // Fall back to the attachment text.
+            }
+        }
+        return attachedTargetContent();
+    }
+
+    /**
      * Text content of the first attached non-test source file, or "".
      */
     private String attachedTargetContent() {
@@ -2232,6 +2277,10 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
                 // Progressive context expansion — each retry sends MORE information
                 String retryContext = result.success() ? "" : RetryContextEngine.buildRetryContext(
                         project.getBasePath(), buildFixAttempts + 1, activeTargetSourcePath, attachedTargetContent());
+                // Private METHOD calls cannot be fixed deterministically — the retry
+                // prompt must force a rewrite through the owning class's public API
+                String privateAccessGuidance = result.success() ? "" :
+                        plugin.testing.PrivateAccessAdvisor.buildRetryGuidance(project.getBasePath(), result.output());
                 SwingUtilities.invokeLater(() -> {
                     if (result.success()) {
                         appendSystemMessage("✓ Build successful.");
@@ -2282,6 +2331,9 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
 
                         String fixInstruction = PromptBuilder.buildCompileFixPrompt(
                                 errors, pathHint, sourceContext, projectType, buildFixAttempts, sameError);
+                        if (!privateAccessGuidance.isBlank()) {
+                            fixInstruction += "\n\n" + privateAccessGuidance;
+                        }
                         if (!retryContext.isBlank()) {
                             fixInstruction += "\n\n" + retryContext;
                         }
@@ -2336,6 +2388,10 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
                 // Progressive context expansion — each retry sends MORE information
                 String retryContext = result.success() ? "" : RetryContextEngine.buildRetryContext(
                         project.getBasePath(), buildFixAttempts + 1, activeTargetSourcePath, attachedTargetContent());
+                // Private METHOD calls cannot be fixed deterministically — the retry
+                // prompt must force a rewrite through the owning class's public API
+                String privateAccessGuidance = result.success() ? "" :
+                        plugin.testing.PrivateAccessAdvisor.buildRetryGuidance(project.getBasePath(), result.output());
                 SwingUtilities.invokeLater(() -> {
                     if (result.success()) {
                         appendSystemMessage("✓ Tests passed successfully.");
@@ -2393,6 +2449,9 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
 
                             String fixInstruction = PromptBuilder.buildTestFixPrompt(
                                     errors, pathHint, sourceContext, projectType, buildFixAttempts, sameError);
+                            if (!privateAccessGuidance.isBlank()) {
+                                fixInstruction += "\n\n" + privateAccessGuidance;
+                            }
                             if (!retryContext.isBlank()) {
                                 fixInstruction += "\n\n" + retryContext;
                             }

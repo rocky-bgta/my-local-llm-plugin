@@ -27,11 +27,18 @@ public final class ImportFixer {
     private static final Pattern ERROR_FILE = Pattern.compile(
             "\\[ERROR\\]\\s+/?([^\\s\\[\\]]+\\.java):\\[\\d+");
     private static final Pattern MISSING_SYMBOL = Pattern.compile(
-            "symbol:\\s+(?:class|interface|variable)\\s+(\\w+)");
+            "symbol:\\s+(?:class|interface|variable|method)\\s+(\\w+)");
     private static final Pattern PACKAGE_DECL = Pattern.compile("(?m)^\\s*package\\s+([\\w.]+)\\s*;");
 
-    /** Common JDK / JUnit types that cannot be found by scanning project sources. */
+    /** Common JDK / JUnit / Mockito types that cannot be found by scanning project sources. */
     private static final Map<String, String> WELL_KNOWN = buildWellKnown();
+
+    /**
+     * Static import resolutions for common assertion and mock helper methods.
+     * Values are prefixed with "static " so {@link #insertImports} emits
+     * {@code import static …;} instead of {@code import …;}.
+     */
+    private static final Map<String, String> WELL_KNOWN_STATIC = buildWellKnownStatic();
 
     private static Map<String, String> buildWellKnown() {
         Map<String, String> m = new LinkedHashMap<>();
@@ -42,6 +49,7 @@ public final class ImportFixer {
         }
         m.put("Collectors", "java.util.stream.Collectors");
         m.put("Stream", "java.util.stream.Stream");
+        m.put("IntStream", "java.util.stream.IntStream");
         m.put("IOException", "java.io.IOException");
         m.put("Path", "java.nio.file.Path");
         m.put("Paths", "java.nio.file.Paths");
@@ -52,17 +60,81 @@ public final class ImportFixer {
         m.put("LocalDate", "java.time.LocalDate");
         m.put("LocalDateTime", "java.time.LocalDateTime");
         m.put("BigDecimal", "java.math.BigDecimal");
+        // JUnit 5 annotations and types
         m.put("Test", "org.junit.jupiter.api.Test");
         m.put("BeforeEach", "org.junit.jupiter.api.BeforeEach");
         m.put("AfterEach", "org.junit.jupiter.api.AfterEach");
+        m.put("BeforeAll", "org.junit.jupiter.api.BeforeAll");
+        m.put("AfterAll", "org.junit.jupiter.api.AfterAll");
         m.put("DisplayName", "org.junit.jupiter.api.DisplayName");
+        m.put("Nested", "org.junit.jupiter.api.Nested");
+        m.put("Disabled", "org.junit.jupiter.api.Disabled");
         m.put("TempDir", "org.junit.jupiter.api.io.TempDir");
+        m.put("ExtendWith", "org.junit.jupiter.api.extension.ExtendWith");
+        m.put("ParameterizedTest", "org.junit.jupiter.params.ParameterizedTest");
+        m.put("ValueSource", "org.junit.jupiter.params.provider.ValueSource");
+        m.put("MethodSource", "org.junit.jupiter.params.provider.MethodSource");
+        m.put("CsvSource", "org.junit.jupiter.params.provider.CsvSource");
+        m.put("Assertions", "org.junit.jupiter.api.Assertions");
+        // Mockito class-level types
         m.put("Mock", "org.mockito.Mock");
+        m.put("InjectMocks", "org.mockito.InjectMocks");
+        m.put("Captor", "org.mockito.Captor");
+        m.put("Spy", "org.mockito.Spy");
         m.put("Mockito", "org.mockito.Mockito");
+        m.put("MockitoAnnotations", "org.mockito.MockitoAnnotations");
+        m.put("ArgumentCaptor", "org.mockito.ArgumentCaptor");
+        m.put("MockitoExtension", "org.mockito.junit.jupiter.MockitoExtension");
+        return m;
+    }
+
+    private static Map<String, String> buildWellKnownStatic() {
+        Map<String, String> m = new LinkedHashMap<>();
+        for (String method : List.of("assertEquals", "assertNotEquals", "assertNull", "assertNotNull",
+                "assertTrue", "assertFalse", "assertThrows", "assertDoesNotThrow",
+                "assertAll", "assertArrayEquals", "assertIterableEquals", "fail")) {
+            m.put(method, "static org.junit.jupiter.api.Assertions." + method);
+        }
+        m.put("when", "static org.mockito.Mockito.when");
+        m.put("verify", "static org.mockito.Mockito.verify");
+        m.put("mock", "static org.mockito.Mockito.mock");
+        m.put("spy", "static org.mockito.Mockito.spy");
+        m.put("doReturn", "static org.mockito.Mockito.doReturn");
+        m.put("doThrow", "static org.mockito.Mockito.doThrow");
+        m.put("any", "static org.mockito.ArgumentMatchers.any");
+        m.put("anyString", "static org.mockito.ArgumentMatchers.anyString");
+        m.put("anyInt", "static org.mockito.ArgumentMatchers.anyInt");
+        m.put("anyLong", "static org.mockito.ArgumentMatchers.anyLong");
+        m.put("eq", "static org.mockito.ArgumentMatchers.eq");
+        m.put("times", "static org.mockito.Mockito.times");
+        m.put("never", "static org.mockito.Mockito.never");
         return m;
     }
 
     private ImportFixer() {}
+
+    /**
+     * Pre-build repair: inserts common java.util / java.util.stream imports the
+     * generated test uses but forgot to declare. Runs right after generation so
+     * no LLM retry or Maven build is spent on a mechanically fixable defect.
+     *
+     * @return human-readable summary of inserted imports, or "" when nothing
+     *         was missing or fixable.
+     */
+    public static String fixCommonImports(String basePath, String relativeTestPath) {
+        if (basePath == null || relativeTestPath == null || relativeTestPath.isBlank()) return "";
+        Path file = Paths.get(basePath).resolve(relativeTestPath);
+        if (!Files.isRegularFile(file)) return "";
+        try {
+            String content = Files.readString(file, StandardCharsets.UTF_8);
+            List<String> missing = TestContentValidator.findMissingImports(content);
+            if (missing.isEmpty()) return "";
+            String change = insertImports(file, missing);
+            return change.isBlank() ? "" : "Auto-fixed missing imports before build: " + change;
+        } catch (IOException e) {
+            return "";
+        }
+    }
 
     /**
      * Parses missing-symbol compile errors and inserts resolvable imports into
@@ -80,6 +152,10 @@ public final class ImportFixer {
         List<String> changes = new ArrayList<>();
         for (Map.Entry<String, Set<String>> entry : symbolsByFile.entrySet()) {
             Path file = Paths.get(entry.getKey());
+            // Maven may emit relative paths; resolve them against the project root
+            if (!file.isAbsolute() && basePath != null && !basePath.isBlank()) {
+                file = Paths.get(basePath).resolve(file);
+            }
             if (!Files.isRegularFile(file)) continue;
             List<String> imports = new ArrayList<>();
             for (String symbol : entry.getValue()) {
@@ -98,8 +174,12 @@ public final class ImportFixer {
         String currentFile = null;
         for (String line : buildOutput.split("\\R")) {
             Matcher f = ERROR_FILE.matcher(line);
-            if (f.find() && line.contains("cannot find symbol")) {
-                currentFile = normalizeErrorPath(f.group(1));
+            if (f.find()) {
+                if (line.contains("cannot find symbol")) {
+                    currentFile = normalizeErrorPath(f.group(1));
+                } else {
+                    currentFile = null;  // different error kind — reset to avoid false attribution
+                }
                 continue;
             }
             Matcher s = MISSING_SYMBOL.matcher(line);
@@ -117,12 +197,18 @@ public final class ImportFixer {
         return path;
     }
 
-    /** Resolves a simple class name to a fully qualified name, or null if unknown/ambiguous. */
+    /**
+     * Resolves a simple class or method name to a fully qualified name, or null
+     * if unknown/ambiguous. Values starting with {@code "static "} indicate that
+     * the caller should emit {@code import static …;} instead of {@code import …;}.
+     */
     static String resolve(String basePath, String symbol) {
         List<String> projectMatches = findProjectClasses(basePath, symbol);
         if (projectMatches.size() == 1) return projectMatches.get(0);
         if (projectMatches.size() > 1) return null;
-        return WELL_KNOWN.get(symbol);
+        String wellKnown = WELL_KNOWN.get(symbol);
+        if (wellKnown != null) return wellKnown;
+        return WELL_KNOWN_STATIC.get(symbol);
     }
 
     private static List<String> findProjectClasses(String basePath, String symbol) {
@@ -168,11 +254,14 @@ public final class ImportFixer {
             StringBuilder block = new StringBuilder();
             List<String> added = new ArrayList<>();
             for (String fqn : fqns) {
-                String importPackage = fqn.substring(0, Math.max(fqn.lastIndexOf('.'), 0));
-                if (importPackage.equals(filePackage)) continue;      // same package — no import needed
-                if (content.contains("import " + fqn + ";")) continue;
-                block.append("import ").append(fqn).append(";\n");
-                added.add(fqn);
+                boolean isStatic = fqn.startsWith("static ");
+                String actual = isStatic ? fqn.substring(7) : fqn;
+                String importPackage = actual.substring(0, Math.max(actual.lastIndexOf('.'), 0));
+                if (!isStatic && importPackage.equals(filePackage)) continue;  // same package, no import needed
+                String importStatement = isStatic ? "import static " + actual + ";" : "import " + actual + ";";
+                if (content.contains(importStatement)) continue;
+                block.append(importStatement).append('\n');
+                added.add(actual);
             }
             if (added.isEmpty()) return "";
             String updated = content.substring(0, insertAt) + "\n" + block + content.substring(insertAt);

@@ -80,10 +80,18 @@ public final class LanguageSupportUtil {
         switch (language) {
             case JAVA -> {
                 if (fileName.endsWith("Test.java") || fileName.endsWith("Tests.java")) return normalized;
+                // Root module: src/main/java/...
                 if (normalized.startsWith("src/main/java/")) {
                     return "src/test/java/" + normalized.substring("src/main/java/".length(), normalized.length() - 5) + "Test.java";
                 }
                 if (normalized.startsWith("src/test/java/")) return normalized;
+                // Multi-module: <module>/src/main/java/...
+                int idx = normalized.indexOf("/src/main/java/");
+                if (idx >= 0) {
+                    String prefix = normalized.substring(0, idx);
+                    String classRel = normalized.substring(idx + "/src/main/java/".length(), normalized.length() - 5);
+                    return prefix + "/src/test/java/" + classRel + "Test.java";
+                }
                 return normalized.substring(0, normalized.length() - 5) + "Test.java";
             }
             case KOTLIN -> {
@@ -92,6 +100,12 @@ public final class LanguageSupportUtil {
                     return "src/test/kotlin/" + normalized.substring("src/main/kotlin/".length(), normalized.length() - 3) + "Test.kt";
                 }
                 if (normalized.startsWith("src/test/kotlin/")) return normalized;
+                int idx = normalized.indexOf("/src/main/kotlin/");
+                if (idx >= 0) {
+                    String prefix = normalized.substring(0, idx);
+                    String classRel = normalized.substring(idx + "/src/main/kotlin/".length(), normalized.length() - 3);
+                    return prefix + "/src/test/kotlin/" + classRel + "Test.kt";
+                }
                 return normalized.substring(0, normalized.length() - 3) + "Test.kt";
             }
             case SCALA -> {
@@ -100,6 +114,12 @@ public final class LanguageSupportUtil {
                     return "src/test/scala/" + normalized.substring("src/main/scala/".length(), normalized.length() - 6) + "Test.scala";
                 }
                 if (normalized.startsWith("src/test/scala/")) return normalized;
+                int idx = normalized.indexOf("/src/main/scala/");
+                if (idx >= 0) {
+                    String prefix = normalized.substring(0, idx);
+                    String classRel = normalized.substring(idx + "/src/main/scala/".length(), normalized.length() - 6);
+                    return prefix + "/src/test/scala/" + classRel + "Test.scala";
+                }
                 return normalized.substring(0, normalized.length() - 6) + "Test.scala";
             }
             case GO -> {

@@ -1,5 +1,6 @@
 package plugin.testing;
 
+import plugin.llm.PromptBuilder;
 import plugin.util.TestReportUtil;
 
 import java.util.List;
@@ -17,11 +18,12 @@ public class TestAnalyzer {
 
     public AnalysisResult analyze(TestRunner.TestRunResult result) {
         if (result.success()) {
-            return new AnalysisResult(true, "All tests passed: " + result.summary(), List.of(), List.of());
+            return new AnalysisResult(true, "All tests passed: " + result.summary(),
+                    List.of(), List.of(), "");
         }
 
         List<String> compileErrors = extractCompileErrors(result.output());
-        List<String> testFailures = extractTestFailures(result.results());
+        List<String> testFailures  = extractTestFailures(result.results());
 
         String diagnosis;
         if (!compileErrors.isEmpty()) {
@@ -32,14 +34,62 @@ public class TestAnalyzer {
             diagnosis = "Unknown failure:\n" + truncate(result.output(), 500);
         }
 
-        return new AnalysisResult(false, diagnosis, compileErrors, testFailures);
+        return new AnalysisResult(false, diagnosis, compileErrors, testFailures, result.output());
     }
 
-    public String buildFixPrompt(AnalysisResult analysis, String lastResponse) {
-        return "The previous attempt failed:\n\n" +
-                analysis.diagnosis() + "\n\n" +
-                "Fix the issue. Use XML tags for file operations.";
+    // ── fix prompt — full error-guided repair ─────────────────────────────────
+
+    /**
+     * Builds a structured repair prompt for the LLM that includes the exact
+     * error location, current file content, related files, and previous attempt
+     * context — matching the error-guided repair spec template.
+     *
+     * @param analysis             result of the failed run
+     * @param lastResponse         last LLM response (used to detect same-error repeat)
+     * @param basePath             project root, used to read file content from disk
+     * @param userRequest          original user request that triggered this task
+     * @param attempt              1-based retry attempt number
+     * @param previousAttemptSummary  brief description of what the last fix tried
+     */
+    public String buildFixPrompt(AnalysisResult analysis,
+                                  String lastResponse,
+                                  String basePath,
+                                  String userRequest,
+                                  int attempt,
+                                  String previousAttemptSummary) {
+
+        String rawOutput = analysis.rawOutput();
+        String failedCommand = analysis.compileErrors().isEmpty() ? "mvn test" : "mvn compile";
+
+        ErrorContext error = ErrorExtractor.extract(rawOutput, basePath, failedCommand);
+
+        String currentFingerprint = analysis.compileErrors().isEmpty()
+                ? AutoFixLoop.extractTestFingerprint(rawOutput)
+                : AutoFixLoop.extractCompileFingerprint(rawOutput);
+        String previousFingerprint = lastResponse == null ? ""
+                : AutoFixLoop.extractCompileFingerprint(lastResponse);
+        boolean sameError = AutoFixLoop.isSameError(previousFingerprint, currentFingerprint);
+
+        return PromptBuilder.buildRepairPrompt(
+                userRequest,
+                error.failedCommand(),
+                error.errorSnippet(),
+                error.affectedFilePath(),
+                error.affectedLine(),
+                error.affectedFileContent(),
+                error.relatedFileContents(),
+                previousAttemptSummary,
+                attempt,
+                sameError
+        );
     }
+
+    /** Backward-compatible overload for callers that do not yet supply full repair context. */
+    public String buildFixPrompt(AnalysisResult analysis, String lastResponse) {
+        return buildFixPrompt(analysis, lastResponse, null, null, 1, null);
+    }
+
+    // ── private helpers ───────────────────────────────────────────────────────
 
     private List<String> extractCompileErrors(String output) {
         return COMPILE_ERROR.matcher(output).results()
@@ -59,10 +109,13 @@ public class TestAnalyzer {
         return text != null && text.length() > max ? text.substring(0, max) + "..." : text;
     }
 
+    // ── result record ─────────────────────────────────────────────────────────
+
     public record AnalysisResult(
             boolean success,
             String diagnosis,
             List<String> compileErrors,
-            List<String> testFailures
+            List<String> testFailures,
+            String rawOutput
     ) {}
 }
