@@ -16,6 +16,8 @@ public class PluginSettings implements PersistentStateComponent<PluginSettings.S
         public String endpoint = "http://127.0.0.1:1234";
         public String model = "qwen2.5-coder-7b-instruct";
         public boolean includeFullContext = true;
+        public int maxOutputTokens = 8192;
+        public int fileOpRetryLimit = 3;
 
         public String gitlabCliPath = "glab";
         public String gitlabProject = "";
@@ -53,6 +55,10 @@ public class PluginSettings implements PersistentStateComponent<PluginSettings.S
     public void   setModel(String v)     { state.model = v; }
     public boolean isIncludeFullContext() { return state.includeFullContext; }
     public void setIncludeFullContext(boolean v) { state.includeFullContext = v; }
+    public int getMaxOutputTokens() { return state.maxOutputTokens > 0 ? state.maxOutputTokens : 8192; }
+    public void setMaxOutputTokens(int v) { state.maxOutputTokens = v; }
+    public int getFileOpRetryLimit() { return state.fileOpRetryLimit > 0 ? state.fileOpRetryLimit : 3; }
+    public void setFileOpRetryLimit(int v) { state.fileOpRetryLimit = v; }
 
     public String getGitlabCliPath() { return state.gitlabCliPath; }
     public void setGitlabCliPath(String v) { state.gitlabCliPath = v; }

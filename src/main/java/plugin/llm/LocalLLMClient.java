@@ -29,6 +29,13 @@ public class LocalLLMClient {
     static long idleTimeoutSeconds = 60;
     static long modelsTimeoutSeconds = 5;
 
+    // 4096 was too small for full Java files and caused truncated file-operation tags.
+    static volatile int maxOutputTokens = 8192;
+
+    public static void setMaxOutputTokens(int tokens) {
+        if (tokens > 0) maxOutputTokens = tokens;
+    }
+
     private final String baseUrl;
     final HttpClient http;
 
@@ -189,7 +196,7 @@ public class LocalLLMClient {
         JsonObject body = new JsonObject();
         body.addProperty("model",      model);
         body.addProperty("stream",     true);
-        body.addProperty("max_tokens", 4096);
+        body.addProperty("max_tokens", maxOutputTokens);
 
         JsonArray msgs = new JsonArray();
         int lastIndex = messages == null ? -1 : messages.size() - 1;

@@ -99,6 +99,10 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
     private boolean awaitingFixFileOps     = false;
     private int     noFileOpReminderRetries = 0;
     private static final int MAX_NO_FILE_OP_REMINDERS = 1;
+    // Agent-style continuation: when a response produces no file ops, auto-resend
+    // the injected correction instead of asking the user to re-ask
+    private int     noFileOpAutoResends    = 0;
+    private static final int MAX_NO_FILE_OP_AUTO_RESENDS = 2;
 
     // Chat display
     private JTextPane      chatPane;
@@ -1212,6 +1216,7 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
         testFixName            = null;
         awaitingFixFileOps     = false;
         noFileOpReminderRetries = 0;
+        noFileOpAutoResends    = 0;
         visibilityFixAttempts  = 0;
         activeTaskAttachments  = attachments.isEmpty() ? List.of() : List.copyOf(attachments);
         String attachedSourcePath = primaryAttachedSourcePath(attachments);
@@ -1407,6 +1412,11 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
                 streamScanOffset = 0;
                 streamWrittenPaths.clear();
                 currentTaskType = taskType;
+                try {
+                    LocalLLMClient.setMaxOutputTokens(PluginSettings.getInstance().getMaxOutputTokens());
+                } catch (RuntimeException ignored) {
+                    // Keep the client default when settings are unavailable.
+                }
                 LocalLLMClient client = new LocalLLMClient(endpoint);
                 LocalLLMClient.ServerState state = client.checkState();
                 applyLlmState(state, model);
@@ -1546,12 +1556,14 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
                             refreshVersionControlStatus();
                             if (hasFileOps && !changesApplied) {
                                 rollbackGeneratedTestWrites("No corrected test file was applied; restored generated-test writes from before this request.");
+                                boolean wasTruncated = opResult.mistakeKeys != null
+                                        && opResult.mistakeKeys.contains("truncated-response");
+                                String truncatedPath = wasTruncated
+                                        ? FileOperationUtil.findTruncatedFileOpPath(fullResponse) : null;
                                 if (taskType == AgentTask.TaskType.GENERATE_TESTS && canRetry) {
-                                    boolean wasTruncated = opResult.mistakeKeys != null
-                                            && opResult.mistakeKeys.contains("truncated-response");
                                     if (wasTruncated) {
                                         appendSystemMessage("⚠ LLM response was cut off before the closing tag — asking it to resend a shorter file…");
-                                        history.add(new ChatMessage("user", buildTruncatedResponseCorrection(userText, attachments)));
+                                        history.add(new ChatMessage("user", buildTruncatedResponseCorrection(userText, attachments, truncatedPath)));
                                     } else {
                                         appendSystemMessage("⚠ Generated-test write was blocked — auto-correcting with stricter test-file instructions…");
                                         history.add(new ChatMessage("user", buildGeneratedTestFileCorrection(userText, attachments)));
@@ -1561,7 +1573,25 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
                                     streamAndHandle(model, endpoint, null, false, taskType, attachments);
                                     return;
                                 }
-                                appendSystemMessage("No file changes were applied, so no build or test run started. Please resend a complete XML file-operation tag with a valid path and full file content.");
+                                if (noFileOpAutoResends < fileOpRetryLimit()) {
+                                    noFileOpAutoResends++;
+                                    appendSystemMessage("⚠ " + (wasTruncated
+                                            ? "Response was cut off before the closing tag"
+                                            : "File write was blocked")
+                                            + " — auto-correcting and retrying ("
+                                            + noFileOpAutoResends + "/" + fileOpRetryLimit() + ")…");
+                                    history.add(new ChatMessage("user", wasTruncated
+                                            ? buildTruncatedResponseCorrection(userText, attachments, truncatedPath)
+                                            : "CORRECTION REQUIRED: Your file operation was not applied. " +
+                                              "Resend EXACTLY ONE complete raw XML tag with a valid project-relative path and the FULL file content, " +
+                                              "including both the opening and closing tags. Output only the XML tag — nothing else."));
+                                    beginAssistantMessage();
+                                    blinkTimer.start();
+                                    streamAndHandle(model, endpoint, null, false, taskType, attachments);
+                                    return;
+                                }
+                                appendSystemMessage("❌ No file changes were applied even after " + fileOpRetryLimit()
+                                        + " automatic corrections — stopped. No build or test run started.");
                                 return;
                             }
                             if (taskType == AgentTask.TaskType.GENERATE_TESTS && changesApplied && !hasAppliedTestFile(opResult)) {
@@ -1657,17 +1687,25 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
                             return;
                         } else {
                             recordMistakes(java.util.List.of("use-xml-tags"));
-                            rollbackGeneratedTestWrites("No file-operation fix was produced; restored generated-test writes from before this request.");
-                            appendSystemMessage("No file operation tags found — no files were changed. " +
-                                    "A correction has been injected. Please ask again.");
                             // Always inject — covers plain-text responses AND post-retry failures
                             history.add(new ChatMessage("user",
                                     "CORRECTION REQUIRED: Your last response still did not write any files. " +
                                     "You MUST output a raw XML tag with complete code inside it, including both opening and closing tags. " +
                                     "Use the detected language and the appropriate test framework or file conventions. " +
                                     "Output ONLY the XML tag — no ``` fences, no explanation before it."));
-                            history.add(new ChatMessage("assistant",
-                                    "Understood. I will output only the raw XML tag with complete code inside it."));
+                            if (noFileOpAutoResends < fileOpRetryLimit()) {
+                                noFileOpAutoResends++;
+                                appendSystemMessage("⚠ No file operation tags found — auto-correcting and retrying ("
+                                        + noFileOpAutoResends + "/" + fileOpRetryLimit() + ")…");
+                                beginAssistantMessage();
+                                blinkTimer.start();
+                                streamAndHandle(model, endpoint, null, false, taskType, attachments);
+                                return;
+                            }
+                            rollbackGeneratedTestWrites("No file-operation fix was produced; restored generated-test writes from before this request.");
+                            appendSystemMessage("❌ Model repeatedly failed to produce file operations after "
+                                    + fileOpRetryLimit() + " automatic corrections. Stopped — " +
+                                    "a correction remains in the conversation, so asking again may still recover.");
                         }
                     } else {
                         // Not in EDITING mode
@@ -1704,7 +1742,28 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
                             refreshVersionControlStatus();
                             if (hasFileOps && !changesApplied) {
                                 rollbackGeneratedTestWrites("No corrected test file was applied; restored generated-test writes from before this request.");
-                                appendSystemMessage("No file changes were applied, so no build or test run started. Please resend a complete XML file-operation tag with a valid path and full file content.");
+                                boolean wasTruncated = opResult.mistakeKeys != null
+                                        && opResult.mistakeKeys.contains("truncated-response");
+                                if (noFileOpAutoResends < fileOpRetryLimit()) {
+                                    noFileOpAutoResends++;
+                                    appendSystemMessage("⚠ " + (wasTruncated
+                                            ? "Response was cut off before the closing tag"
+                                            : "File write was blocked")
+                                            + " — auto-correcting and retrying ("
+                                            + noFileOpAutoResends + "/" + fileOpRetryLimit() + ")…");
+                                    history.add(new ChatMessage("user", wasTruncated
+                                            ? buildTruncatedResponseCorrection(userText, attachments,
+                                                    FileOperationUtil.findTruncatedFileOpPath(fullResponse))
+                                            : "CORRECTION REQUIRED: Your file operation was not applied. " +
+                                              "Resend EXACTLY ONE complete raw XML tag with a valid project-relative path and the FULL file content, " +
+                                              "including both the opening and closing tags. Output only the XML tag — nothing else."));
+                                    beginAssistantMessage();
+                                    blinkTimer.start();
+                                    streamAndHandle(model, endpoint, null, false, taskType, attachments);
+                                    return;
+                                }
+                                appendSystemMessage("❌ No file changes were applied even after " + fileOpRetryLimit()
+                                        + " automatic corrections — stopped. No build or test run started.");
                                 return;
                             }
                             if (opResult.runTests) {
@@ -1983,22 +2042,38 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
                 """.formatted(targetLine).trim();
     }
 
-    private String buildTruncatedResponseCorrection(String userText, List<AttachmentData> attachments) {
-        String expectedPath = expectedTestPathFromAttachments(attachments);
-        String targetLine = expectedPath == null || expectedPath.isBlank()
-                ? "Infer the matching test path from the attached/current source file."
-                : "Write the test at exactly `" + expectedPath + "`.";
+    private int fileOpRetryLimit() {
+        try {
+            return PluginSettings.getInstance().getFileOpRetryLimit();
+        } catch (RuntimeException e) {
+            return MAX_NO_FILE_OP_AUTO_RESENDS;
+        }
+    }
+
+    private String buildTruncatedResponseCorrection(String userText, List<AttachmentData> attachments,
+                                                    String truncatedPath) {
+        String targetPath = truncatedPath != null && !truncatedPath.isBlank()
+                ? truncatedPath
+                : expectedTestPathFromAttachments(attachments);
+        String targetLine = targetPath == null || targetPath.isBlank()
+                ? "Infer the target file path from the original request and the attached/current source file."
+                : "Target file: " + targetPath;
+        String requestLine = userText == null || userText.isBlank()
+                ? ""
+                : "Original request: " + userText + "\n";
         return """
-                CORRECTION REQUIRED: Your previous response was cut off — the closing XML tag was missing and the file was NOT written.
-                You must resend the complete file from scratch in a single response.
-                %s
-                Keep the test file SHORT: write at most 8 focused tests. Skip trivial getters and long setup blocks.
-                Use the project's JUnit 5 setup and the AAA pattern: Arrange, Act, Assert.
-                Return exactly one complete raw XML tag with both the opening AND closing tag:
-                <CREATE_FILE path="<test path>">complete compile-ready test content</CREATE_FILE>
-                If the test file already exists, use <MODIFY_FILE> instead.
-                Output only the XML tag — nothing else.
-                """.formatted(targetLine).trim();
+                CORRECTION REQUIRED: The previous response was incomplete and ended before the closing file-operation tag. The file was NOT written.
+                %s%s
+                Regenerate ONLY this file operation. Return one complete valid file-operation block with:
+                - a valid project-relative path
+                - the FULL file content
+                - the proper opening tag
+                - the proper closing tag
+                <CREATE_FILE path="<target path>">complete content</CREATE_FILE> — or <MODIFY_FILE> if the file already exists.
+                Keep the file SHORT so it fits in a single response. For tests: at most 8 focused JUnit 5 tests using the AAA pattern; skip trivial getters and long setup blocks.
+                Do not include explanations. Do not include partial content. Do not include multiple files.
+                Do not continue from the previous output — regenerate the full file from the beginning.
+                """.formatted(requestLine, targetLine).trim();
     }
 
     private String expectedTestPathFromAttachments(List<AttachmentData> attachments) {

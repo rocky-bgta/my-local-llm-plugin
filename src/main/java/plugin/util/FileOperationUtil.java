@@ -458,6 +458,25 @@ public class FileOperationUtil {
         return success[0];
     }
 
+    /**
+     * Path of a file-op whose opening tag streamed but whose closing tag never arrived
+     * (truncated model output), or null if the response has no such partial op.
+     */
+    public static String findTruncatedFileOpPath(String response) {
+        if (response == null || response.isBlank()) return null;
+        Matcher matcher = PARTIAL_FILE_OP_PATTERN.matcher(response);
+        String lastType = null;
+        String lastPath = null;
+        int lastEnd = -1;
+        while (matcher.find()) {
+            lastType = matcher.group(1);
+            lastPath = matcher.group(2).trim();
+            lastEnd = matcher.end();
+        }
+        if (lastPath == null) return null;
+        return response.indexOf("</" + lastType + ">", lastEnd) >= 0 ? null : lastPath;
+    }
+
     static ParsedFileOperation extractPartialFileOperation(String response) {
         Matcher matcher = PARTIAL_FILE_OP_PATTERN.matcher(response);
         if (!matcher.find()) return null;
