@@ -103,6 +103,7 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
     // the injected correction instead of asking the user to re-ask
     private int     noFileOpAutoResends    = 0;
     private static final int MAX_NO_FILE_OP_AUTO_RESENDS = 2;
+    private int     testContentFixResends  = 0;
 
     // Chat display
     private JTextPane      chatPane;
@@ -151,6 +152,7 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
     private       boolean       streaming       = false;
     private       boolean       cursorOn        = false;
     private final StringBuilder assistantBuffer = new StringBuilder();
+    private final StreamDisplayMasker displayMasker = new StreamDisplayMasker();
 
     // Conversation history
     private final List<ChatMessage> history = new ArrayList<>();
@@ -1217,6 +1219,7 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
         awaitingFixFileOps     = false;
         noFileOpReminderRetries = 0;
         noFileOpAutoResends    = 0;
+        testContentFixResends  = 0;
         visibilityFixAttempts  = 0;
         activeTaskAttachments  = attachments.isEmpty() ? List.of() : List.copyOf(attachments);
         String attachedSourcePath = primaryAttachedSourcePath(attachments);
@@ -1610,6 +1613,23 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
                                 appendSystemMessage("No test file was written. Please resend a complete XML tag for the matching *Test file.");
                                 return;
                             }
+                            if (taskType == AgentTask.TaskType.GENERATE_TESTS && changesApplied
+                                    && testContentFixResends < fileOpRetryLimit()) {
+                                List<String> testViolations = collectGeneratedTestViolations(opResult);
+                                if (!testViolations.isEmpty()) {
+                                    testContentFixResends++;
+                                    recordMistakes(java.util.List.of("public-api-only"));
+                                    appendSystemMessage("⚠ Generated test will not compile ("
+                                            + testViolations.size() + " issue(s) found) — auto-correcting ("
+                                            + testContentFixResends + "/" + fileOpRetryLimit() + ")…");
+                                    history.add(new ChatMessage("user",
+                                            buildTestContentCorrection(opResult, testViolations)));
+                                    beginAssistantMessage();
+                                    blinkTimer.start();
+                                    streamAndHandle(model, endpoint, null, false, taskType, attachments);
+                                    return;
+                                }
+                            }
                             reportGeneratedTestLocation(taskType, opResult);
                             String generatedTestName = ChatPanelSupport.testClassNameFromPaths(opResult.appliedFiles);
                             if (opResult.runTests) {
@@ -1877,6 +1897,7 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
         streaming = true;
         cursorOn  = false;
         assistantBuffer.setLength(0);
+        displayMasker.reset();
         insert("Assistant\n", assistantRoleStyle);
     }
 
@@ -1884,11 +1905,16 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
         assistantBuffer.append(token);
         estimatedOutputTokens += ChatPanelSupport.estimateTokens(token);
         refreshWorkspaceStatus();
-        removeCursorIfPresent();
-        insert(token, assistantTextStyle);
-        insert("▌", cursorStyle);
-        cursorOn = true;
-        chatPane.setCaretPosition(chatDoc.getLength());
+        // Show only the masked view — file-operation blocks are hidden and
+        // replaced with a one-line placeholder; the raw buffer keeps everything.
+        String visible = displayMasker.feed(token);
+        if (!visible.isEmpty()) {
+            removeCursorIfPresent();
+            insert(visible, assistantTextStyle);
+            insert("▌", cursorStyle);
+            cursorOn = true;
+            chatPane.setCaretPosition(chatDoc.getLength());
+        }
         if ("EDITING".equals(mode)) {
             applyStreamingFileOps();
         }
@@ -1920,6 +1946,10 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
         streaming = false;
         blinkTimer.stop();
         removeCursorIfPresent();
+        String heldBack = displayMasker.finish();
+        if (!heldBack.isEmpty()) {
+            insert(heldBack, assistantTextStyle);
+        }
         insert("\n\n", assistantTextStyle);
         chatPane.setCaretPosition(chatDoc.getLength());
     }
@@ -2035,6 +2065,8 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
                 Do not modify src/main/java production files unless a minimal test seam is absolutely required and a test file is written in the same response.
                 %s
                 Use the project's JUnit 5 setup and AAA pattern in each test: Arrange, Act, Assert.
+                Test ONLY public methods and constructors — NEVER call private methods, private constants, or private nested types (they do not compile).
+                Include EVERY import the test needs (org.junit.jupiter.api and all java.util classes you use).
                 For IntelliJ AnAction classes, do not instantiate, subclass, or implement AnActionEvent; do not create fake IntelliJ classes such as ProjectDelegate; do not mock static IntelliJ services such as ToolWindowManager.getInstance(project). Prefer package-private helper methods or protected overrides from the source.
                 Return exactly one complete raw XML tag: <CREATE_FILE path="<test path>">complete compile-ready test content</CREATE_FILE>.
                 If the test file already exists, use <MODIFY_FILE> with the complete corrected content.
@@ -2048,6 +2080,55 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
         } catch (RuntimeException e) {
             return MAX_NO_FILE_OP_AUTO_RESENDS;
         }
+    }
+
+    /**
+     * Static pre-build scan of a just-written test file: private-member usage
+     * and missing imports are caught here so the correction names the exact
+     * problem instead of waiting for raw compiler output.
+     */
+    private List<String> collectGeneratedTestViolations(FileOperationUtil.FileOpResult opResult) {
+        if (opResult == null || opResult.appliedFiles == null) return List.of();
+        String testPath = opResult.appliedFiles.stream()
+                .filter(plugin.util.LanguageSupportUtil::isTestFile)
+                .filter(p -> p.endsWith(".java"))
+                .findFirst()
+                .orElse(null);
+        String basePath = project.getBasePath();
+        if (testPath == null || basePath == null) return List.of();
+        try {
+            java.nio.file.Path base = Paths.get(basePath);
+            String testContent = java.nio.file.Files.readString(base.resolve(testPath));
+            String sourceContent = "";
+            if (activeTargetSourcePath != null && !activeTargetSourcePath.isBlank()) {
+                java.nio.file.Path src = base.resolve(activeTargetSourcePath);
+                if (java.nio.file.Files.exists(src)) {
+                    sourceContent = java.nio.file.Files.readString(src);
+                }
+            }
+            return plugin.testing.TestContentValidator.findViolations(sourceContent, testContent);
+        } catch (Exception e) {
+            return List.of();
+        }
+    }
+
+    private String buildTestContentCorrection(FileOperationUtil.FileOpResult opResult,
+                                              List<String> violations) {
+        String testPath = opResult.appliedFiles.stream()
+                .filter(plugin.util.LanguageSupportUtil::isTestFile)
+                .findFirst()
+                .orElse("<same test path>");
+        StringBuilder sb = new StringBuilder(
+                "CORRECTION REQUIRED: The test you just wrote will NOT compile:\n");
+        violations.forEach(v -> sb.append("- ").append(v).append('\n'));
+        sb.append("Rewrite the COMPLETE test file and fix every issue listed above.\n")
+          .append("Test ONLY public methods and constructors from the source class. ")
+          .append("NEVER reference private methods, private constants, or private nested types.\n")
+          .append("Include EVERY import the test needs (org.junit.jupiter.api and any java.util classes you use).\n")
+          .append("Resend the full corrected file as one tag: <MODIFY_FILE path=\"")
+          .append(testPath)
+          .append("\">complete content</MODIFY_FILE>. Output only the XML tag.");
+        return sb.toString();
     }
 
     private String buildTruncatedResponseCorrection(String userText, List<AttachmentData> attachments,
@@ -3338,6 +3419,9 @@ public class ChatPanel implements com.intellij.openapi.Disposable {
                     + "Write the actual test file at " + suggestedTestPath + ". "
                     + sourceSnippet
                     + "Use ONLY the constructors and methods that appear in the source above — do NOT invent overloads. "
+                    + "Test ONLY public methods and constructors — NEVER call private methods, private constants, "
+                    + "or private nested types, even if they appear in the retrieved source (they do not compile). "
+                    + "Include EVERY import the test needs: org.junit.jupiter.api and all java.util classes you use. "
                     + "Use the project's detected language and test framework. "
                     + "Use the AAA pattern in each test: Arrange, Act, Assert. "
                     + "Keep it concise: at most 8 focused tests, no comments, no verbose setup. "

@@ -46,6 +46,10 @@ public class LLMCorrectionsUtil {
         RULES.put("uppercase-xml-tags",
                 "File operation XML tags MUST be UPPERCASE: <MODIFY_FILE>, <CREATE_FILE>, <DELETE_FILE>. " +
                 "Never use lowercase (<modify_file>) or mixed-case (<Modify_File>).");
+        RULES.put("public-api-only",
+                "Tests MUST use ONLY the public API of the class under test. NEVER call private methods, " +
+                "reference private constants, or instantiate private nested types — they do not compile. " +
+                "Always include EVERY import the test file needs (JUnit 5 and all java.util classes used).");
         RULES.put("correct-test-package",
                 "Test files MUST follow the test layout conventions of the detected language and project. " +
                 "Keep the test path aligned with the source file/module/package structure when the language requires it.");

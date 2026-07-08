@@ -41,6 +41,8 @@ public class TestGenerator {
         }
 
         prompt.append("Requirements:\n")
+                .append("- Test ONLY public methods and constructors — never call private methods, private constants, or private nested types\n")
+                .append("- Include EVERY import the test needs (test framework and all java.util classes used)\n")
                 .append("- Use the project's native test framework\n")
                 .append("- Follow the language's usual testing style and conventions\n")
                 .append("- Use the AAA pattern in each test: Arrange, Act, Assert\n")
